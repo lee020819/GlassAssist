@@ -1,0 +1,73 @@
+연결할 때
+Jupyter notebook 4_30에서 실행할 셀 순서 명시
+
+1. 셀 2: 서버 기본 세팅
+import nest_asyncio ~~
+
+2. 셀 3: TTS API 추가
+from gtts import gTTS ~~
+
+3. from peft import Peftmodel ~~
+-------------------------------------------------------------------
+여기부터 음성 -> 텍스트 (STT)
+-------------------------------------------------------------------
+4. # 셀 8: Whisper 모델 로드
+import whisper
+
+5. # 셀 9 교체: librosa로 ffmpeg 우회
+import librosa
+
+6. # 새 셀: WebSocket 서버 추가
+import asyncio
+
+7. # 셀 12: gTTS 대신 wav 파일로 Mock 음성 생성
+import numpy as np
+
+8. import requests
+response = requests.get("http://localhost:8000/health")
+
+9. from IPython.display import Audio
+
+10. import numpy as np
+import soundfile as sf
+
+11. # 셀 14
+import urllib.parse
+from fastapi import Request as FastAPIRequest  ← 추가됨, 함께 실행
+
+12. from sentence_transformers import SentenceTransformer
+import faiss
+
+13. def search_rag(query: str, top_k: int = 3) -> str:
+
+14. # 새 셀: Android 연속 음성인식 텍스트 수신 API
+from pydantic import BaseModel
+
+class ChatRequest(BaseModel):
+    text: str
+
+@app.post("/chat")
+async def chat(req: ChatRequest):
+    answer = analyze_with_llama(req.text, "ko")
+    await send_to_glass(answer)
+    return {"answer": answer}
+
+print("Chat API 등록 완료!")
+
+-------------------------------------------------------------------------
+# 파인튜닝 확인 테스트 코드 -> JSONL 파일 보고 테스트 가능
+result = analyze_with_llama("PSD 장애코드 501")
+print(result)
+
+# 535 테스트 -> RAG 테스트 코드
+context = search_rag("PSD 535번 코드가 뭐야?")
+print(context)
+
+-------------------------------------------------------------------------------------
+원하는 답변이 다를 때 유사도 검사 -> 거리가 낮을수록 유사도 높은 것
+
+query_vec = embed_model.encode(["PSD 535번 코드가 뭐야?"]).astype("float32")
+distances, indices = index.search(query_vec, 5)
+
+for dist, idx in zip(distances[0], indices[0]):
+    print(f"거리: {dist:.4f} / {data[idx]['question']}")
