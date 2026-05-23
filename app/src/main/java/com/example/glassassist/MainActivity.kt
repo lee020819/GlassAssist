@@ -8,11 +8,14 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
+import android.media.AudioTrack
 import android.os.FileObserver
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
+import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.os.Build
 import android.provider.MediaStore
@@ -111,7 +114,7 @@ class MainActivity : AppCompatActivity() {
     private var audioRecord: AudioRecord? = null
     private var audioFilePath: String = ""
     private var isRecording = false
-    private val sampleRate = 16000
+    private val sampleRate = 8000
     private val channelConfig = AudioFormat.CHANNEL_IN_MONO
     private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
 
@@ -120,7 +123,12 @@ class MainActivity : AppCompatActivity() {
     private val monitorRestartHandler = Handler(Looper.getMainLooper())
 
     private var isBluetoothScoOn = false
+    private var isScoConnecting = false
+    private var scoKeepAliveTrack: AudioTrack? = null
     private var isHandlingDanger = false
+    private var isTranslationMode = false
+    private var isGeminiMode = false
+    private val scoRetryHandler = Handler(Looper.getMainLooper())
     private var glassFileObserver: FileObserver? = null
     private var mediaStoreObserver: ContentObserver? = null
     private val processedGlassFiles = mutableSetOf<String>()
@@ -152,11 +160,17 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val NAVER_CLIENT_ID = "YkmvsxAbXEj1AOeuGW0n"
         private const val NAVER_CLIENT_SECRET = "H4fKvtP0Fj"
+        private const val GEMINI_API_KEY = "AIzaSyDcLzHO0Fe4TlhFQwYEl9YAkfoOOLfQfKE"
         private const val NEWS_PREVIEW_COUNT = 3
         private val META_AI_DIR = "/storage/emulated/0/Download/Meta AI"
         private val WAKE_WORDS = listOf("안녕글래스", "안녕 글래스", "안녕글레스", "안녕 글레스")
         // 안경 파일명 형식: 20260517_141507_hash.mp4
         private val GLASS_FILE_REGEX = Regex("""^(\d{8})_(\d{6})_[0-9a-f]+\.(mp4|mov|jpg|jpeg|png)$""")
+        val dispatchLog = mutableListOf<String>()
+        var lastDispatchUrl: String? = null
+        val translationLog = mutableListOf<String>()
+        var translationModeActive = false
+        val aiLog = mutableListOf<String>()
     }
 
     private val standbyHandler = Handler(Looper.getMainLooper())
@@ -175,32 +189,93 @@ class MainActivity : AppCompatActivity() {
 
     private val scoReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) return
             val state = intent?.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, -1)
             when (state) {
                 AudioManager.SCO_AUDIO_STATE_CONNECTED -> {
+                    isScoConnecting = false
                     isBluetoothScoOn = true
-                    reinitTtsAndRecord()
+                    Log.d("GlassAssist", "안경 SCO 연결 완료")
+                    reinitTtsForSco()
                 }
                 AudioManager.SCO_AUDIO_STATE_DISCONNECTED -> {
+                    isScoConnecting = false
                     isBluetoothScoOn = false
+                    stopScoKeepAlive()
+                    Log.d("GlassAssist", "안경 SCO 끊김, 재연결 시도")
+                    startScoRetry()
                 }
             }
         }
     }
 
-    private fun reinitTtsAndRecord() {
+    private fun reinitTtsForSco() {
         tts.stop()
         tts.shutdown()
         tts = TextToSpeech(this) { status ->
             if (status == TextToSpeech.SUCCESS) {
                 tts.language = Locale.KOREAN
+                audioManager.setStreamVolume(
+                    AudioManager.STREAM_VOICE_CALL,
+                    audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL),
+                    0
+                )
+                startScoKeepAlive()
                 messageServer?.stop()
                 messageServer = MessageServer(tts)
-                messageServer?.start()
+                try { messageServer?.start() } catch (e: Exception) {
+                    Log.e("GlassAssist", "MessageServer 시작 실패: ${e.message}")
+                    messageServer = null
+                }
             }
-            Handler(Looper.getMainLooper()).postDelayed({ startRecordingInternal() }, 300)
+            if (!isRecording) resumeContinuousMonitoring()
         }
+    }
+
+    private fun startScoKeepAlive() {
+        stopScoKeepAlive()
+        val sampleRate = 8000
+        val bufferSize = AudioTrack.getMinBufferSize(
+            sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
+        )
+        scoKeepAliveTrack = AudioTrack.Builder()
+            .setAudioAttributes(AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build())
+            .setAudioFormat(AudioFormat.Builder()
+                .setSampleRate(sampleRate)
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                .build())
+            .setBufferSizeInBytes(bufferSize)
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .build()
+        scoKeepAliveTrack?.play()
+        val silence = ShortArray(bufferSize / 2)
+        Thread {
+            val track = scoKeepAliveTrack
+            while (track != null && track.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                track.write(silence, 0, silence.size)
+            }
+        }.also { it.isDaemon = true }.start()
+        Log.d("GlassAssist", "SCO keep-alive 시작")
+    }
+
+    private fun stopScoKeepAlive() {
+        scoKeepAliveTrack?.stop()
+        scoKeepAliveTrack?.release()
+        scoKeepAliveTrack = null
+    }
+
+    private fun startScoRetry() {
+        scoRetryHandler.removeCallbacksAndMessages(null)
+        if (isBluetoothScoOn) return
+        tryActivateBluetoothSco()
+        // 10초 후 재시도 (연결 성공 시 scoReceiver에서 handler 취소됨)
+        scoRetryHandler.postDelayed({
+            isScoConnecting = false
+            if (!isBluetoothScoOn) startScoRetry()
+        }, 10000)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -259,7 +334,10 @@ class MainActivity : AppCompatActivity() {
             if (status == TextToSpeech.SUCCESS) {
                 tts.language = Locale.KOREAN
                 messageServer = MessageServer(tts)
-                messageServer?.start()
+                try { messageServer?.start() } catch (e: Exception) {
+                    Log.e("GlassAssist", "MessageServer 시작 실패: ${e.message}")
+                    messageServer = null
+                }
                 connectWebSocket()
                 connectDispatchWebSocket()
             }
@@ -431,7 +509,7 @@ class MainActivity : AppCompatActivity() {
 
     @Suppress("DEPRECATION")
     private fun queryGlassFiles(contentUri: Uri, nameCol: String, dataCol: String, cutoffSec: Long) {
-        val bucketCol = MediaStore.MediaColumns.BUCKET_NAME
+        val bucketCol = "bucket_display_name"
         contentResolver.query(
             contentUri, arrayOf(nameCol, dataCol, bucketCol),
             "${MediaStore.MediaColumns.DATE_ADDED} >= ?",
@@ -949,14 +1027,27 @@ class MainActivity : AppCompatActivity() {
         dispatchWebSocket?.close(1000, "재연결")
         val request = Request.Builder().url(url).build()
         dispatchWebSocket = client.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                lastDispatchUrl = url
+            }
             override fun onMessage(webSocket: WebSocket, text: String) {
                 try {
                     val json = JSONObject(text)
-                    if (json.optString("type") == "dispatch") {
-                        val message = json.getString("message")
-                        runOnUiThread {
-                            tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "dispatch_${System.currentTimeMillis()}")
-                            sttText.text = "관제실: $message\n[터치하면 음성 녹음]"
+                    val now = timeFormat.format(java.util.Date())
+                    when (json.optString("type")) {
+                        "dispatch" -> {
+                            val message = json.getString("message")
+                            dispatchLog.add(0, "[$now] 📥 관제실: $message")
+                            runOnUiThread {
+                                tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "dispatch_${System.currentTimeMillis()}")
+                                sttText.text = "관제실: $message\n[터치하면 음성 녹음]"
+                            }
+                        }
+                        "audio_to_worker" -> {
+                            val audioData = json.getString("data")
+                            val from = json.optString("from", "관제실")
+                            dispatchLog.add(0, "[$now] 📥 $from: 음성 수신")
+                            playDispatchAudio(audioData)
                         }
                     }
                 } catch (e: Exception) {
@@ -964,15 +1055,24 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                lastDispatchUrl = null
                 Handler(Looper.getMainLooper()).postDelayed({ connectDispatchWebSocket() }, 5000)
             }
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {}
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                lastDispatchUrl = null
+            }
         })
     }
 
     private fun startRecording() {
         if (isRecording) return
         pauseContinuousMonitoring()
+
+        if (isBluetoothScoOn) {
+            startRecordingInternal()
+            return
+        }
+
         runOnUiThread { sttText.text = "안경 마이크 연결 중..." }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -1023,6 +1123,17 @@ class MainActivity : AppCompatActivity() {
         audioRecord?.release()
         audioRecord = AudioRecord(audioSource, sampleRate, channelConfig, audioFormat, bufferSize)
 
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && isBluetoothScoOn) {
+            val scoInput = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+                .firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+            if (scoInput != null) {
+                audioRecord?.setPreferredDevice(scoInput)
+                Log.d("GlassAssist", "안경 마이크 명시 설정: ${scoInput.productName}")
+            } else {
+                Log.d("GlassAssist", "SCO 입력 장치 없음 → 폰 마이크 사용")
+            }
+        }
+
         if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
             runOnUiThread { sttText.text = "마이크 초기화 실패" }
             audioRecord?.release()
@@ -1055,16 +1166,7 @@ class MainActivity : AppCompatActivity() {
         audioRecord?.release()
         audioRecord = null
 
-        if (isBluetoothScoOn) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                audioManager.clearCommunicationDevice()
-            } else {
-                @Suppress("DEPRECATION")
-                audioManager.stopBluetoothSco()
-                audioManager.mode = AudioManager.MODE_NORMAL
-            }
-            isBluetoothScoOn = false
-        }
+        // SCO 유지 — 안경 마이크를 연속 모니터링에서도 계속 사용
         runOnUiThread { sttText.text = "서버로 오디오 전송 중..." }
     }
 
@@ -1182,6 +1284,31 @@ class MainActivity : AppCompatActivity() {
                     return
                 }
 
+                if (isTranslationMode && !isHandlingDanger && text.length >= 2) {
+                    val normalized = text.replace(" ", "").lowercase()
+                    if (normalized.contains("번역종료") || normalized.contains("통역종료") ||
+                        (normalized.contains("beon") && normalized.contains("jong")) ||
+                        (normalized.contains("trans") && normalized.contains("stop"))) {
+                        isTranslationMode = false
+                        translationModeActive = false
+                        runOnUiThread {
+                            sttText.text = "'안녕 글래스'라고 불러주세요\n[터치하면 음성 녹음]"
+                            tts.speak("번역 모드를 종료합니다", TextToSpeech.QUEUE_FLUSH, null, "tmode_off")
+                        }
+                        resumeContinuousMonitoring()
+                        return
+                    }
+                    translateAndSpeak(text)
+                    scheduleMonitorRestart()
+                    return
+                }
+
+                if (isGeminiMode && !isHandlingDanger && text.length >= 2) {
+                    isGeminiMode = false
+                    askGemini(text)
+                    return
+                }
+
                 if (!isHandlingDanger) {
                     val detector = KeywordDetector(this@MainActivity)
                     val detection = detector.detect(text)
@@ -1202,6 +1329,28 @@ class MainActivity : AppCompatActivity() {
                         runOnUiThread {
                             sttText.text = "점검 유형?\n일상 / 정기 / 수시 / 특별 / 긴급"
                             tts.speak("일상, 정기, 수시, 특별, 긴급 중 어떤 점검인가요?", TextToSpeech.QUEUE_FLUSH, null, "insp_type")
+                        }
+                    } else if (text.replace(" ", "").let { it.contains("관제호출") || it.contains("관제통화") }) {
+                        startDispatchRecording()
+                        return
+                    } else if (text.replace(" ", "").let { it.contains("통역시작") || it.contains("번역시작") }) {
+                        isTranslationMode = true
+                        translationModeActive = true
+                        isAwake = false
+                        wakeTimeoutHandler.removeCallbacksAndMessages(null)
+                        runOnUiThread {
+                            sttText.text = "번역 모드 시작\n외국어로 말씀해 주세요"
+                            tts.speak("번역 모드를 시작합니다", TextToSpeech.QUEUE_FLUSH, null, "tmode_on")
+                        }
+                    } else if (text.replace(" ", "").let {
+                            it.equals("ai", ignoreCase = true) || it.contains("에이아이")
+                        }) {
+                        isGeminiMode = true
+                        isAwake = false
+                        wakeTimeoutHandler.removeCallbacksAndMessages(null)
+                        runOnUiThread {
+                            sttText.text = "AI 모드\n질문하세요"
+                            tts.speak("네, 질문하세요", TextToSpeech.QUEUE_FLUSH, null, "gemini_wake")
                         }
                     } else if (WAKE_WORDS.any { text.replace(" ", "").contains(it.replace(" ", "")) }) {
                         isAwake = true
@@ -1259,7 +1408,9 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            override fun onError(error: Int) { if (!isHandlingDanger) scheduleMonitorRestart() }
+            override fun onError(error: Int) {
+                if (!isHandlingDanger) scheduleMonitorRestart()
+            }
             override fun onReadyForSpeech(params: Bundle?) {}
             override fun onBeginningOfSpeech() {}
             override fun onRmsChanged(rmsdB: Float) {}
@@ -1268,6 +1419,7 @@ class MainActivity : AppCompatActivity() {
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
         startListeningIntent()
+        startScoRetry()
     }
 
     private fun activateInspectionCameraMode(type: String, facility: String, location: String) {
@@ -1355,16 +1507,196 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
+    private fun startDispatchRecording() {
+        if (userPrefs.dispatchWsUrl == null) {
+            tts.speak("관제실이 연결되지 않았습니다. QR 코드를 스캔해 주세요", TextToSpeech.QUEUE_FLUSH, null, "dispatch_no_conn")
+            return
+        }
+        pauseContinuousMonitoring()
+        Thread {
+            runOnUiThread {
+                tts.speak("관제실 연결, 말씀하세요", TextToSpeech.QUEUE_FLUSH, null, "dispatch_start")
+                sttText.text = "관제실에 전송 중...\n(말씀 후 잠시 침묵하면 자동 전송)"
+            }
+            Thread.sleep(1500)
+
+            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                Handler(Looper.getMainLooper()).post { resumeContinuousMonitoring() }
+                return@Thread
+            }
+
+            val audioSource = if (isBluetoothScoOn) MediaRecorder.AudioSource.VOICE_COMMUNICATION
+                              else MediaRecorder.AudioSource.MIC
+            val bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
+            val recorder = AudioRecord(audioSource, sampleRate, channelConfig, audioFormat, bufferSize)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && isBluetoothScoOn) {
+                val scoInput = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+                    .firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+                if (scoInput != null) recorder.setPreferredDevice(scoInput)
+            }
+
+            recorder.startRecording()
+            val allData = mutableListOf<Short>()
+            val buffer = ShortArray(bufferSize)
+            var silentSamples = 0
+            val silenceLimit = sampleRate * 2
+            val maxSamples = sampleRate * 20
+
+            while (allData.size < maxSamples) {
+                val read = recorder.read(buffer, 0, bufferSize)
+                if (read <= 0) break
+                allData.addAll(buffer.take(read).toList())
+                val rms = kotlin.math.sqrt(buffer.take(read).map { it.toDouble() * it }.average())
+                silentSamples = if (rms < 700) silentSamples + read else 0
+                if (silentSamples >= silenceLimit) break
+            }
+
+            recorder.stop()
+            recorder.release()
+
+            val tempPath = "${externalCacheDir?.absolutePath}/dispatch_out.wav"
+            saveAsWav(allData.toShortArray(), tempPath)
+            val base64 = android.util.Base64.encodeToString(java.io.File(tempPath).readBytes(), android.util.Base64.NO_WRAP)
+            val now = timeFormat.format(java.util.Date())
+            val payload = JSONObject().put("type", "audio_from_worker").put("data", base64).put("from", userId).toString()
+            val sent = dispatchWebSocket?.send(payload) ?: false
+
+            runOnUiThread {
+                if (sent) {
+                    dispatchLog.add(0, "[$now] 📤 나 → 관제실: 음성 전송")
+                    sttText.text = "관제실에 전송됐습니다.\n[터치하면 음성 녹음]"
+                    tts.speak("관제실에 전송됐습니다", TextToSpeech.QUEUE_FLUSH, null, "dispatch_sent")
+                } else {
+                    tts.speak("관제실 연결을 확인하세요", TextToSpeech.QUEUE_FLUSH, null, "dispatch_fail")
+                }
+            }
+            Handler(Looper.getMainLooper()).postDelayed({ resumeContinuousMonitoring() }, 2000)
+        }.start()
+    }
+
+    private fun playDispatchAudio(base64Data: String) {
+        Thread {
+            try {
+                val bytes = android.util.Base64.decode(base64Data, android.util.Base64.DEFAULT)
+                val tempFile = java.io.File(cacheDir, "dispatch_in.webm")
+                tempFile.writeBytes(bytes)
+                val mp = MediaPlayer()
+                mp.setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                mp.setDataSource(tempFile.absolutePath)
+                mp.prepare()
+                mp.start()
+                mp.setOnCompletionListener { mp.release() }
+                runOnUiThread { sttText.text = "관제실 음성 수신\n[터치하면 음성 녹음]" }
+            } catch (e: Exception) {
+                Log.e("GlassAssist", "관제 오디오 재생 실패: ${e.message}")
+            }
+        }.start()
+    }
+
+    private fun translateAndSpeak(sourceText: String, sourceLang: String = "en") {
+        Thread {
+            try {
+                val formBody = okhttp3.FormBody.Builder()
+                    .add("source", sourceLang)
+                    .add("target", "ko")
+                    .add("text", sourceText)
+                    .build()
+                val request = Request.Builder()
+                    .url("https://openapi.naver.com/v1/papago/n2mt")
+                    .addHeader("X-Naver-Client-Id", NAVER_CLIENT_ID)
+                    .addHeader("X-Naver-Client-Secret", NAVER_CLIENT_SECRET)
+                    .post(formBody)
+                    .build()
+                val response = client.newCall(request).execute()
+                if (response.isSuccessful) {
+                    val json = JSONObject(response.body?.string() ?: "")
+                    val translated = json.getJSONObject("message")
+                        .getJSONObject("result")
+                        .getString("translatedText")
+                    val now = timeFormat.format(java.util.Date())
+                    translationLog.add(0, "[$now] $sourceText\n        → $translated")
+                    runOnUiThread {
+                        sttText.text = "[외국인]: $sourceText\n[번역]: $translated"
+                        tts.speak(translated, TextToSpeech.QUEUE_FLUSH, null, "translate_${System.currentTimeMillis()}")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("GlassAssist", "Papago 번역 실패: ${e.message}")
+            }
+        }.start()
+    }
+
+    private fun askGemini(question: String) {
+        pauseContinuousMonitoring()
+        runOnUiThread { sttText.text = "Gemini AI 처리 중...\n$question" }
+        Thread {
+            try {
+                val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$GEMINI_API_KEY"
+                val body = JSONObject().apply {
+                    put("systemInstruction", JSONObject().apply {
+                        put("parts", JSONObject().apply {
+                            put("text", "너는 서울역 역무원의 스마트 글래스 비서다. " +
+                                "소음이 심한 현장이므로 모든 답변은 친절하고 정중하되, " +
+                                "무조건 1~2문장 이내로 요약해서 핵심만 극도로 짧게 대답해라. " +
+                                "서론과 미사여구는 절대 금지한다.")
+                        })
+                    })
+                    put("contents", org.json.JSONArray().put(
+                        JSONObject().put("parts", org.json.JSONArray().put(
+                            JSONObject().put("text", question)
+                        ))
+                    ))
+                }.toString().toRequestBody("application/json".toMediaType())
+                val request = Request.Builder().url(url).post(body).build()
+                val response = client.newCall(request).execute()
+                val answer = if (response.isSuccessful) {
+                    try {
+                        val json = JSONObject(response.body?.string() ?: "")
+                        json.getJSONArray("candidates")
+                            .getJSONObject(0)
+                            .getJSONObject("content")
+                            .getJSONArray("parts")
+                            .getJSONObject(0)
+                            .getString("text")
+                    } catch (e: Exception) { "응답 파싱 실패" }
+                } else "AI 오류 (${response.code})"
+                val now = timeFormat.format(java.util.Date())
+                aiLog.add(0, "[$now] Q: $question\n       A: $answer")
+                addQaRecord(question, answer)
+                runOnUiThread {
+                    sttText.text = "Q: $question\n\nA: $answer"
+                    tts.speak(answer, TextToSpeech.QUEUE_FLUSH, null, "gemini_${System.currentTimeMillis()}")
+                    standbyHandler.removeCallbacks(standbyRunnable)
+                    standbyHandler.postDelayed(standbyRunnable, 3000)
+                    resumeContinuousMonitoring()
+                }
+            } catch (e: Exception) {
+                Log.e("GlassAssist", "Gemini 오류: ${e.message}")
+                runOnUiThread {
+                    tts.speak("AI 연결에 실패했습니다", TextToSpeech.QUEUE_FLUSH, null, "gemini_err")
+                    resumeContinuousMonitoring()
+                }
+            }
+        }.start()
+    }
+
     private fun startListeningIntent() {
         if (!isMonitoring || isRecording) return
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ko-KR")
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, if (isTranslationMode) "en-US" else "ko-KR")
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 800L)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 500L)
         }
+        continuousSpeechRecognizer?.cancel()
         continuousSpeechRecognizer?.startListening(intent)
     }
 
@@ -1379,6 +1711,28 @@ class MainActivity : AppCompatActivity() {
 
     private fun resumeContinuousMonitoring() {
         if (isMonitoring) scheduleMonitorRestart()
+    }
+
+    private fun tryActivateBluetoothSco() {
+        if (isBluetoothScoOn || isScoConnecting) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val scoDevice = audioManager.availableCommunicationDevices
+                .firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+            if (scoDevice != null) {
+                isScoConnecting = true
+                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                audioManager.setCommunicationDevice(scoDevice)
+                Log.d("GlassAssist", "SCO 연결 요청 (API 31+), 연결 대기 중...")
+                // 연결 완료는 scoReceiver SCO_AUDIO_STATE_CONNECTED에서 처리
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            if (!audioManager.isBluetoothScoAvailableOffCall) return
+            isScoConnecting = true
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            @Suppress("DEPRECATION")
+            audioManager.startBluetoothSco()
+        }
     }
 
     private fun checkPermissions(): Boolean {
@@ -1536,20 +1890,26 @@ $handoverText
             FeatureItem(R.drawable.ic_video, "영상전송", "video"),
             FeatureItem(R.drawable.ic_meter, "계량기", "meter"),
             FeatureItem(R.drawable.ic_handover, "인수인계", "handover"),
-            FeatureItem(0, "", "empty"),
-            FeatureItem(0, "", "empty"),
-            FeatureItem(0, "", "empty"),
+            FeatureItem(R.drawable.ic_dispatch, "관제실", "dispatch"),
+            FeatureItem(R.drawable.ic_translate, "번역", "translate"),
+            FeatureItem(R.drawable.ic_ai, "AI 보조", "ai"),
             FeatureItem(0, "", "empty"),
         )
         val rvFeatures = findViewById<RecyclerView>(R.id.rv_features)
         rvFeatures.layoutManager = GridLayoutManager(this, 3)
         rvFeatures.isNestedScrollingEnabled = false
         rvFeatures.adapter = FeatureGridAdapter(features) { feature ->
-            startActivity(Intent(this, RecordListActivity::class.java).apply {
-                putExtra("type", feature.type)
-                putExtra("label", feature.label)
-                putExtra("userId", userId)
-            })
+            when (feature.type) {
+                "dispatch" -> startActivity(Intent(this, DispatchActivity::class.java))
+                "translate" -> startActivity(Intent(this, TranslateActivity::class.java))
+                "ai" -> startActivity(Intent(this, AiActivity::class.java))
+                "empty" -> {}
+                else -> startActivity(Intent(this, RecordListActivity::class.java).apply {
+                    putExtra("type", feature.type)
+                    putExtra("label", feature.label)
+                    putExtra("userId", userId)
+                })
+            }
         }
     }
 
@@ -1618,6 +1978,8 @@ $handoverText
         monitorRestartHandler.removeCallbacksAndMessages(null)
         standbyHandler.removeCallbacksAndMessages(null)
         wakeTimeoutHandler.removeCallbacksAndMessages(null)
+        scoRetryHandler.removeCallbacksAndMessages(null)
+        stopScoKeepAlive()
         continuousSpeechRecognizer?.destroy()
         glassFileObserver?.stopWatching()
         mediaStoreObserver?.let { contentResolver.unregisterContentObserver(it) }
@@ -1628,8 +1990,8 @@ $handoverText
             } else {
                 @Suppress("DEPRECATION")
                 audioManager.stopBluetoothSco()
-                audioManager.mode = AudioManager.MODE_NORMAL
             }
+            audioManager.mode = AudioManager.MODE_NORMAL
         }
         tts.stop()
         tts.shutdown()

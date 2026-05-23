@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#F0F4F8">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:background="#1A237E"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="8dp"
+        android:paddingEnd="16dp">
+
+        <ImageButton
+            android:id="@+id/btn_back"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:src="@android:drawable/ic_menu_revert"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:tint="#FFFFFF"/>
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="🤖 AI 보조"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"/>
+
+        <TextView
+            android:id="@+id/tv_mode_dot"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="● Gemini"
+            android:textSize="12sp"
+            android:textColor="#90CAF9"/>
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@drawable/card_background"
+        android:elevation="4dp"
+        android:orientation="vertical"
+        android:padding="16dp"
+        android:layout_margin="12dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="💡 'AI' 또는 '에이아이'라고 외치면 Gemini AI 모드로 진입\n💡 이후 질문하면 AI가 답변 후 자동으로 일반 모드로 복귀"
+            android:textSize="13sp"
+            android:textColor="#1565C0"
+            android:lineSpacingExtra="4dp"/>
+    </LinearLayout>
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="AI 대화 기록"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        android:textColor="#1A237E"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="4dp"/>
+
+    <ListView
+        android:id="@+id/list_ai_log"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:divider="#E0E0E0"
+        android:dividerHeight="1dp"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"/>
+</LinearLayout>
