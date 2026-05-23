@@ -10,6 +10,24 @@ class QAMatcher(private val context: Context) {
         private const val TAG = "QAMatcher"
         private const val QA_FILE = "train_data_standardized.jsonl"
         private const val NO_ANSWER = "죄송합니다, 해당 내용에 대한 답변을 찾지 못했습니다. 매뉴얼을 확인해 주세요."
+        private const val MIN_SCORE_THRESHOLD = 3
+
+        private val SYNONYM_MAP = mapOf(
+            "도어" to listOf("문", "출입문", "게이트"),
+            "문" to listOf("도어", "출입문", "게이트"),
+            "에러" to listOf("오류", "에러", "고장", "이상"),
+            "오류" to listOf("에러", "오류", "고장", "이상"),
+            "고장" to listOf("에러", "오류", "이상", "불량"),
+            "코드" to listOf("번호", "코드", "넘버"),
+            "PSD" to listOf("스크린도어", "안전문", "승강장문"),
+            "스크린도어" to listOf("PSD", "안전문", "승강장문"),
+            "승객" to listOf("손님", "여객", "탑승객"),
+            "역무원" to listOf("직원", "담당자", "관계자"),
+            "열차" to listOf("전철", "지하철", "기차"),
+            "지하철" to listOf("전철", "열차", "기차"),
+            "긴급" to listOf("비상", "위급", "응급"),
+            "비상" to listOf("긴급", "위급", "응급")
+        )
     }
 
     private data class QAEntry(
@@ -68,11 +86,22 @@ class QAMatcher(private val context: Context) {
             "어떻게", "뭐야", "뭐", "이거", "저거", "그거",
             "하면", "해야", "되나", "되는", "있어", "없어",
             "이야", "이에요", "입니다", "합니다", "해줘", "알려줘",
-            "좀", "제발", "빨리", "지금", "바로", "즉시"
+            "좀", "제발", "빨리", "지금", "바로", "즉시",
+            "가", "이", "은", "는", "을", "를", "의", "에", "서"
         )
         return text.split(" ", "?", "!", ".", ",")
             .map { it.trim() }
             .filter { it.length >= 2 && it !in stopWords }
+    }
+
+    private fun expandWithSynonyms(text: String): String {
+        var expanded = text
+        SYNONYM_MAP.forEach { (word, synonyms) ->
+            if (text.contains(word)) {
+                synonyms.forEach { synonym -> expanded += synonym }
+            }
+        }
+        return expanded
     }
 
     fun findBestAnswer(inputText: String): String {
@@ -83,20 +112,23 @@ class QAMatcher(private val context: Context) {
 
         val inputKeywords = extractKeywords(inputText)
         val normalizedInput = inputText.replace(" ", "")
+        val expandedInput = expandWithSynonyms(normalizedInput)
 
         var bestScore = 0
         var bestAnswer = ""
+        var bestQuestion = ""
 
         for (entry in qaList) {
-            val score = calculateScore(normalizedInput, inputKeywords, entry)
+            val score = calculateScore(normalizedInput, expandedInput, inputKeywords, entry)
             if (score > bestScore) {
                 bestScore = score
                 bestAnswer = entry.answer
+                bestQuestion = entry.question
             }
         }
 
-        return if (bestScore >= 1) {
-            Log.d(TAG, "매칭 성공 (점수: $bestScore): ${bestAnswer.take(50)}...")
+        return if (bestScore >= MIN_SCORE_THRESHOLD) {
+            Log.d(TAG, "매칭 성공 (점수: $bestScore) 질문: $bestQuestion")
             bestAnswer
         } else {
             Log.d(TAG, "매칭 실패 (최고 점수: $bestScore)")
@@ -104,28 +136,43 @@ class QAMatcher(private val context: Context) {
         }
     }
 
-    private fun calculateScore(normalizedInput: String, inputKeywords: List<String>, entry: QAEntry): Int {
+    private fun calculateScore(
+        normalizedInput: String,
+        expandedInput: String,
+        inputKeywords: List<String>,
+        entry: QAEntry
+    ): Int {
         var score = 0
         val normalizedQuestion = entry.question.replace(" ", "")
+        val expandedQuestion = expandWithSynonyms(normalizedQuestion)
+
+        if (normalizedQuestion == normalizedInput) return 100
 
         if (normalizedQuestion.contains(normalizedInput) || normalizedInput.contains(normalizedQuestion)) {
             score += 10
         }
 
+        if (expandedQuestion.contains(normalizedInput) || expandedInput.contains(normalizedQuestion)) {
+            score += 5
+        }
+
         val numberRegex = Regex("\\d{3,}")
         val inputNumbers = numberRegex.findAll(normalizedInput).map { it.value }.toSet()
         val questionNumbers = numberRegex.findAll(normalizedQuestion).map { it.value }.toSet()
-        val matchedNumbers = inputNumbers.intersect(questionNumbers)
-        score += matchedNumbers.size * 20
-
-        val unmatchedNumbers = questionNumbers - inputNumbers
-        score -= unmatchedNumbers.size * 10
+        score += inputNumbers.intersect(questionNumbers).size * 20
+        score -= (questionNumbers - inputNumbers).size * 10
 
         for (keyword in inputKeywords) {
-            if (normalizedQuestion.contains(keyword)) score += 2
+            if (normalizedQuestion.contains(keyword)) score += 3
+            SYNONYM_MAP[keyword]?.forEach { synonym ->
+                if (normalizedQuestion.contains(synonym)) score += 2
+            }
         }
         for (entryKeyword in entry.keywords) {
-            if (normalizedInput.contains(entryKeyword)) score += 2
+            if (normalizedInput.contains(entryKeyword)) score += 3
+            SYNONYM_MAP[entryKeyword]?.forEach { synonym ->
+                if (normalizedInput.contains(synonym)) score += 2
+            }
         }
 
         for (len in minOf(normalizedInput.length, 6) downTo 2) {

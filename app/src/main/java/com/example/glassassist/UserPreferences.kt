@@ -20,4 +20,8 @@ class UserPreferences(context: Context) {
     var handoverMemo: String?
         get() = prefs.getString("handover_memo", null)
         set(value) = prefs.edit().putString("handover_memo", value).apply()
+
+    var dispatchWsUrl: String?
+        get() = prefs.getString("dispatch_ws_url", null)
+        set(value) = prefs.edit().putString("dispatch_ws_url", value).apply()
 }

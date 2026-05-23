@@ -33,13 +33,18 @@
             android:value="AR|1514654607033386|084442f2e5e1f548ecf74bf744b739af" />
 
         <activity
-            android:name=".MainActivity"
+            android:name=".SplashActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity android:name=".RecordListActivity" android:exported="false"/>
+        <activity android:name=".NewsActivity" android:exported="false"/>
+
+        <activity android:name=".MainActivity" android:exported="false"/>
         <service
             android:name=".GlassAssistService"
             android:foregroundServiceType="microphone"
@@ -49,6 +54,7 @@
         <activity android:name=".ProtectionDetailActivity" android:exported="false"/>
         <activity android:name=".VideoDetailActivity" android:exported="false"/>
         <activity android:name=".MeterDetailActivity" android:exported="false"/>
+        <activity android:name=".HandoverDetailActivity" android:exported="false"/>
 
         <provider
             android:name="androidx.core.content.FileProvider"

@@ -1,8 +1,11 @@
 package com.example.glassassist
 
+import android.app.AlertDialog
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.view.View
+import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.TextView
@@ -178,6 +181,69 @@ class MeterDetailActivity : AppCompatActivity() {
             imgMeter.setImageURI(photoUri)
             imgMeter.visibility = View.VISIBLE
             tvNoImage.visibility = View.GONE
+        }
+    }
+}
+
+class HandoverDetailActivity : AppCompatActivity() {
+    private var position: Int = -1
+    private lateinit var tvContent: EditText
+    private var isEditMode = false
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_handover_detail)
+
+        findViewById<ImageButton>(R.id.btn_back).setOnClickListener { finish() }
+
+        position = intent.getIntExtra("position", -1)
+        val date = intent.getStringExtra("date") ?: "-"
+        val time = intent.getStringExtra("time") ?: "-"
+        val content = intent.getStringExtra("content") ?: "-"
+
+        findViewById<TextView>(R.id.tv_date).text = date
+        findViewById<TextView>(R.id.tv_time).text = time
+
+        tvContent = findViewById(R.id.tv_content)
+        tvContent.setText(content)
+        tvContent.isEnabled = false
+
+        val btnEdit = findViewById<android.widget.Button>(R.id.btn_edit)
+
+        btnEdit.setOnClickListener {
+            if (!isEditMode) {
+                isEditMode = true
+                tvContent.isEnabled = true
+                tvContent.requestFocus()
+                btnEdit.text = "✅ 저장하기"
+            } else {
+                val newContent = tvContent.text.toString().trim()
+                if (newContent.isNotEmpty() && position >= 0) {
+                    val resultIntent = Intent().apply {
+                        putExtra("action", "edit")
+                        putExtra("position", position)
+                        putExtra("newContent", newContent)
+                    }
+                    setResult(RESULT_OK, resultIntent)
+                    finish()
+                }
+            }
+        }
+
+        findViewById<android.widget.Button>(R.id.btn_delete).setOnClickListener {
+            AlertDialog.Builder(this)
+                .setTitle("삭제")
+                .setMessage("이 인수인계 항목을 삭제하시겠습니까?")
+                .setPositiveButton("삭제") { _, _ ->
+                    val resultIntent = Intent().apply {
+                        putExtra("action", "delete")
+                        putExtra("position", position)
+                    }
+                    setResult(RESULT_OK, resultIntent)
+                    finish()
+                }
+                .setNegativeButton("취소", null)
+                .show()
         }
     }
 }

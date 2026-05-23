@@ -40,6 +40,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
 import android.app.AlertDialog
+import android.database.ContentObserver
 import android.net.Uri
 import android.widget.EditText
 import androidx.activity.result.ActivityResultLauncher
@@ -51,6 +52,13 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
 import kotlin.math.abs
+import android.view.LayoutInflater
+import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.tabs.TabLayout
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 
 class MainActivity : AppCompatActivity() {
 
@@ -96,7 +104,9 @@ class MainActivity : AppCompatActivity() {
     private val wsUrl get() = userPrefs.wsUrl
 
     private var webSocket: WebSocket? = null
+    private var dispatchWebSocket: WebSocket? = null
     private val client = OkHttpClient()
+    private lateinit var qrScanLauncher: ActivityResultLauncher<ScanOptions>
 
     private var audioRecord: AudioRecord? = null
     private var audioFilePath: String = ""
@@ -112,9 +122,12 @@ class MainActivity : AppCompatActivity() {
     private var isBluetoothScoOn = false
     private var isHandlingDanger = false
     private var glassFileObserver: FileObserver? = null
+    private var mediaStoreObserver: ContentObserver? = null
     private val processedGlassFiles = mutableSetOf<String>()
 
     private var isMeterMode = false
+    private var isAwake = false
+    private val wakeTimeoutHandler = Handler(Looper.getMainLooper())
 
     private enum class InspectionStep { IDLE, WAITING_TYPE, WAITING_LOCATION }
     private var inspectionStep = InspectionStep.IDLE
@@ -134,9 +147,14 @@ class MainActivity : AppCompatActivity() {
 
     private val handoverList = mutableListOf<String>()
     private lateinit var handoverAdapter: ArrayAdapter<String>
+    private lateinit var newsAdapter: NewsAdapter
 
     companion object {
+        private const val NAVER_CLIENT_ID = "YkmvsxAbXEj1AOeuGW0n"
+        private const val NAVER_CLIENT_SECRET = "H4fKvtP0Fj"
+        private const val NEWS_PREVIEW_COUNT = 3
         private val META_AI_DIR = "/storage/emulated/0/Download/Meta AI"
+        private val WAKE_WORDS = listOf("안녕글래스", "안녕 글래스", "안녕글레스", "안녕 글레스")
         // 안경 파일명 형식: 20260517_141507_hash.mp4
         private val GLASS_FILE_REGEX = Regex("""^(\d{8})_(\d{6})_[0-9a-f]+\.(mp4|mov|jpg|jpeg|png)$""")
     }
@@ -149,8 +167,8 @@ class MainActivity : AppCompatActivity() {
                 standbyHandler.postDelayed(this, 1000)
                 return
             }
-            tts.speak("음성인식 대기 중입니다", TextToSpeech.QUEUE_FLUSH, null, "standby")
-            runOnUiThread { sttText.text = "음성인식 대기 중...\n[터치하면 음성 녹음]" }
+            tts.speak("안녕 글래스라고 불러주세요", TextToSpeech.QUEUE_FLUSH, null, "standby")
+            runOnUiThread { sttText.text = "'안녕 글래스'라고 불러주세요\n[터치하면 음성 녹음]" }
             monitorRestartHandler.postDelayed({ resumeContinuousMonitoring() }, 2000)
         }
     }
@@ -188,6 +206,13 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        qrScanLauncher = registerForActivityResult(ScanContract()) { result ->
+            val url = result.contents ?: return@registerForActivityResult
+            userPrefs.dispatchWsUrl = url
+            connectDispatchWebSocket()
+            android.widget.Toast.makeText(this, "관제 서버 연결: $url", android.widget.Toast.LENGTH_SHORT).show()
+        }
+
         phoneCameraLauncher = registerForActivityResult(ActivityResultContracts.TakePicture()) { success ->
             if (success) {
                 val location = pendingInspectionType
@@ -214,13 +239,14 @@ class MainActivity : AppCompatActivity() {
 
         statusText = findViewById(R.id.status_text)
         sttText = findViewById(R.id.stt_text)
-        sttText.text = "대기 중...\n[터치하면 음성 녹음]"
+        sttText.text = "'안녕 글래스'라고 불러주세요\n[터치하면 음성 녹음]"
 
         if (userPrefs.userId == null) showUserIdDialog()
 
         setupLists()
         loadAllRecordsFromDb()
         setupButtons()
+        setupDashboard()
 
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
 
@@ -235,7 +261,17 @@ class MainActivity : AppCompatActivity() {
                 messageServer = MessageServer(tts)
                 messageServer?.start()
                 connectWebSocket()
+                connectDispatchWebSocket()
             }
+        }
+
+        findViewById<TextView>(R.id.btn_dispatch_qr).setOnClickListener {
+            val opts = ScanOptions().apply {
+                setPrompt("관제 서버 QR 코드를 스캔하세요")
+                setBeepEnabled(false)
+                setOrientationLocked(false)
+            }
+            qrScanLauncher.launch(opts)
         }
 
         findViewById<TextView>(R.id.btn_standby).setOnClickListener {
@@ -272,6 +308,7 @@ class MainActivity : AppCompatActivity() {
         if (checkPermissions()) {
             startContinuousMonitoring()
             registerGlassMediaObserver()
+            registerMediaStoreObserver()
         } else {
             requestPermissions()
         }
@@ -358,6 +395,65 @@ class MainActivity : AppCompatActivity() {
         }
         glassFileObserver?.startWatching()
         Log.d("GlassAssist", "Meta AI 폴더 감시 시작: $META_AI_DIR")
+    }
+
+    private fun registerMediaStoreObserver() {
+        mediaStoreObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean, uri: Uri?) {
+                Thread { checkNewGlassMedia() }.start()
+            }
+        }
+        contentResolver.registerContentObserver(
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI, true, mediaStoreObserver!!
+        )
+        contentResolver.registerContentObserver(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, true, mediaStoreObserver!!
+        )
+        Log.d("GlassAssist", "MediaStore 전체 감시 시작 (자동 전송 감지용)")
+    }
+
+    @Suppress("DEPRECATION")
+    private fun checkNewGlassMedia() {
+        val cutoffSec = (System.currentTimeMillis() / 1000) - 30
+        queryGlassFiles(
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            MediaStore.Video.Media.DISPLAY_NAME,
+            MediaStore.Video.Media.DATA,
+            cutoffSec
+        )
+        queryGlassFiles(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            MediaStore.Images.Media.DISPLAY_NAME,
+            MediaStore.Images.Media.DATA,
+            cutoffSec
+        )
+    }
+
+    @Suppress("DEPRECATION")
+    private fun queryGlassFiles(contentUri: Uri, nameCol: String, dataCol: String, cutoffSec: Long) {
+        val bucketCol = MediaStore.MediaColumns.BUCKET_NAME
+        contentResolver.query(
+            contentUri, arrayOf(nameCol, dataCol, bucketCol),
+            "${MediaStore.MediaColumns.DATE_ADDED} >= ?",
+            arrayOf(cutoffSec.toString()),
+            "${MediaStore.MediaColumns.DATE_ADDED} DESC"
+        )?.use { cursor ->
+            val nameIdx = cursor.getColumnIndexOrThrow(nameCol)
+            val dataIdx = cursor.getColumnIndexOrThrow(dataCol)
+            val bucketIdx = cursor.getColumnIndexOrThrow(bucketCol)
+            while (cursor.moveToNext()) {
+                val name = cursor.getString(nameIdx).takeIf { it.isNotBlank() } ?: continue
+                val path = cursor.getString(dataIdx).takeIf { it.isNotBlank() } ?: continue
+                val bucket = cursor.getString(bucketIdx) ?: ""
+                val isMetaAlbum = bucket.equals("Meta View", ignoreCase = true) ||
+                                  bucket.equals("Meta AI", ignoreCase = true)
+                val isGlassFile = GLASS_FILE_REGEX.matches(name) || isMetaAlbum
+                if (isGlassFile) {
+                    val file = java.io.File(path)
+                    if (file.exists()) tryLinkGlassFile(file, name)
+                }
+            }
+        }
     }
 
     private fun analyzeMeterImage(file: java.io.File, imageUri: String) {
@@ -651,6 +747,15 @@ class MainActivity : AppCompatActivity() {
         handoverAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, mutableListOf<String>())
         val handoverListView = findViewById<ListView>(R.id.list_handover)
         handoverListView.adapter = handoverAdapter
+        handoverListView.setOnItemClickListener { _, _, position, _ ->
+            val content = handoverList[position]
+            startActivityForResult(Intent(this, HandoverDetailActivity::class.java).apply {
+                putExtra("date", "")
+                putExtra("time", "")
+                putExtra("content", content)
+                putExtra("position", position)
+            }, 200)
+        }
     }
 
     private fun setupButtons() {
@@ -744,6 +849,8 @@ class MainActivity : AppCompatActivity() {
                 .setPositiveButton("추가") { _, _ ->
                     val memo = input.text.toString().trim()
                     if (memo.isNotEmpty()) {
+                        val now = Date()
+                        dbExecutor.execute { db.insertHandover(userId, dateFormat.format(now), timeFormat.format(now), memo) }
                         handoverList.add(memo)
                         handoverAdapter.clear()
                         handoverList.forEachIndexed { i, s -> handoverAdapter.add("${i+1}. $s") }
@@ -833,6 +940,32 @@ class MainActivity : AppCompatActivity() {
                 Handler(Looper.getMainLooper()).postDelayed({ connectWebSocket() }, 3000)
             }
 
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {}
+        })
+    }
+
+    private fun connectDispatchWebSocket() {
+        val url = userPrefs.dispatchWsUrl ?: return
+        dispatchWebSocket?.close(1000, "재연결")
+        val request = Request.Builder().url(url).build()
+        dispatchWebSocket = client.newWebSocket(request, object : WebSocketListener() {
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                try {
+                    val json = JSONObject(text)
+                    if (json.optString("type") == "dispatch") {
+                        val message = json.getString("message")
+                        runOnUiThread {
+                            tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "dispatch_${System.currentTimeMillis()}")
+                            sttText.text = "관제실: $message\n[터치하면 음성 녹음]"
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e("GlassAssist", "관제 메시지 파싱 오류: ${e.message}")
+                }
+            }
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                Handler(Looper.getMainLooper()).postDelayed({ connectDispatchWebSocket() }, 5000)
+            }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {}
         })
     }
@@ -1060,6 +1193,9 @@ class MainActivity : AppCompatActivity() {
                             sttText.text = "긴급 상황 감지!\n\n안경 버튼을 눌러 영상을 녹화하세요.\nMeta AI 앱에서 '가져오기'를 누르면 자동 연결됩니다."
                             tts.speak(detector.getAlertMessage(detection), TextToSpeech.QUEUE_FLUSH, null, "alert_${System.currentTimeMillis()}")
                         }
+                    } else if (tts.isSpeaking) {
+                        scheduleMonitorRestart()
+                        return
                     } else if (inspectionTriggerKeywords.any { text.contains(it) }) {
                         inspectionFacility = inspectionTriggerKeywords.first { text.contains(it) }
                         inspectionStep = InspectionStep.WAITING_TYPE
@@ -1067,7 +1203,20 @@ class MainActivity : AppCompatActivity() {
                             sttText.text = "점검 유형?\n일상 / 정기 / 수시 / 특별 / 긴급"
                             tts.speak("일상, 정기, 수시, 특별, 긴급 중 어떤 점검인가요?", TextToSpeech.QUEUE_FLUSH, null, "insp_type")
                         }
-                    } else if (text.length >= 5) {
+                    } else if (WAKE_WORDS.any { text.replace(" ", "").contains(it.replace(" ", "")) }) {
+                        isAwake = true
+                        wakeTimeoutHandler.removeCallbacksAndMessages(null)
+                        wakeTimeoutHandler.postDelayed({
+                            isAwake = false
+                            runOnUiThread { sttText.text = "'안녕 글래스'라고 불러주세요\n[터치하면 음성 녹음]" }
+                        }, 10_000)
+                        runOnUiThread {
+                            sttText.text = "네, 말씀하세요\n[터치하면 음성 녹음]"
+                            tts.speak("네, 말씀하세요", TextToSpeech.QUEUE_FLUSH, null, "wake_${System.currentTimeMillis()}")
+                        }
+                    } else if (isAwake && text.length >= 2) {
+                        isAwake = false
+                        wakeTimeoutHandler.removeCallbacksAndMessages(null)
                         sendTextToServer(text)
                         return
                     }
@@ -1079,6 +1228,13 @@ class MainActivity : AppCompatActivity() {
                 if (isHandlingDanger) return
                 val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull() ?: return
+                // TTS 응답 중 음성 중지 명령
+                if (tts.isSpeaking && (text.contains("중지") || text.contains("대기") || text.contains("취소") || text.contains("그만") || text.contains("멈춰"))) {
+                    tts.stop()
+                    runOnUiThread { sttText.text = "응답 중지됨.\n[터치하면 음성 녹음]" }
+                    scheduleMonitorRestart()
+                    return
+                }
                 // 음성 Q&A 중지/대기
                 if (activeCall != null && (text.contains("중지") || text.contains("대기") || text.contains("취소"))) {
                     activeCall?.cancel()
@@ -1190,6 +1346,7 @@ class MainActivity : AppCompatActivity() {
                     tts.speak(answer, TextToSpeech.QUEUE_FLUSH, null, "qa_${System.currentTimeMillis()}")
                     standbyHandler.removeCallbacks(standbyRunnable)
                     standbyHandler.postDelayed(standbyRunnable, 3000)
+                    resumeContinuousMonitoring()
                 }
             } catch (e: Exception) {
                 Log.e("GlassAssist", "텍스트 전송 실패: ${e.message}")
@@ -1249,6 +1406,7 @@ class MainActivity : AppCompatActivity() {
         if (requestCode == 1001 && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
             startContinuousMonitoring()
             registerGlassMediaObserver()
+            registerMediaStoreObserver()
         } else {
             runOnUiThread { sttText.text = "권한이 필요합니다. 앱 설정에서 허용해주세요." }
         }
@@ -1307,14 +1465,162 @@ $handoverText
         }
     }
 
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 200 && resultCode == RESULT_OK && data != null) {
+            val action = data.getStringExtra("action")
+            val position = data.getIntExtra("position", -1)
+            if (position >= 0) {
+                when (action) {
+                    "edit" -> {
+                        val newContent = data.getStringExtra("newContent") ?: return
+                        val oldContent = handoverList[position]
+                        dbExecutor.execute { db.updateHandover(userId, oldContent, newContent) }
+                        handoverList[position] = newContent
+                        handoverAdapter.clear()
+                        handoverList.forEachIndexed { i, s -> handoverAdapter.add("${i+1}. $s") }
+                        handoverAdapter.notifyDataSetChanged()
+                    }
+                    "delete" -> {
+                        val oldContent = handoverList[position]
+                        dbExecutor.execute { db.deleteHandover(userId, oldContent) }
+                        handoverList.removeAt(position)
+                        handoverAdapter.clear()
+                        handoverList.forEachIndexed { i, s -> handoverAdapter.add("${i+1}. $s") }
+                        handoverAdapter.notifyDataSetChanged()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun setupDashboard() {
+        val rvNews = findViewById<RecyclerView>(R.id.rv_news)
+        val tabNews = findViewById<TabLayout>(R.id.tab_news)
+
+        newsAdapter = NewsAdapter(mutableListOf()) { item ->
+            if (item.link.isNotEmpty()) startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(item.link)))
+        }
+        rvNews.layoutManager = LinearLayoutManager(this)
+        rvNews.adapter = newsAdapter
+
+        val tab0View = LayoutInflater.from(this).inflate(R.layout.tab_news_header, null)
+        tab0View.findViewById<TextView>(R.id.tv_tab_label).text = "네이버 뉴스"
+        tab0View.findViewById<TextView>(R.id.tv_tab_more).setOnClickListener {
+            startActivity(Intent(this, NewsActivity::class.java).apply { putExtra("source", "naver") })
+        }
+
+        val tab1View = LayoutInflater.from(this).inflate(R.layout.tab_news_header, null)
+        tab1View.findViewById<TextView>(R.id.tv_tab_label).text = "KORAIL 뉴스"
+        tab1View.findViewById<TextView>(R.id.tv_tab_more).setOnClickListener {
+            startActivity(Intent(this, NewsActivity::class.java).apply { putExtra("source", "korail") })
+        }
+
+        tabNews.addTab(tabNews.newTab().setCustomView(tab0View))
+        tabNews.addTab(tabNews.newTab().setCustomView(tab1View))
+
+        tabNews.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
+            override fun onTabSelected(tab: TabLayout.Tab) {
+                if (tab.position == 0) fetchNaverNews() else fetchKorailNews()
+            }
+            override fun onTabUnselected(tab: TabLayout.Tab?) {}
+            override fun onTabReselected(tab: TabLayout.Tab?) {}
+        })
+
+        fetchNaverNews()
+
+        val features = listOf(
+            FeatureItem(R.drawable.ic_qa, "질의응답", "qa"),
+            FeatureItem(R.drawable.ic_protection, "접객보호", "protection"),
+            FeatureItem(R.drawable.ic_video, "영상전송", "video"),
+            FeatureItem(R.drawable.ic_meter, "계량기", "meter"),
+            FeatureItem(R.drawable.ic_handover, "인수인계", "handover"),
+            FeatureItem(0, "", "empty"),
+            FeatureItem(0, "", "empty"),
+            FeatureItem(0, "", "empty"),
+            FeatureItem(0, "", "empty"),
+        )
+        val rvFeatures = findViewById<RecyclerView>(R.id.rv_features)
+        rvFeatures.layoutManager = GridLayoutManager(this, 3)
+        rvFeatures.isNestedScrollingEnabled = false
+        rvFeatures.adapter = FeatureGridAdapter(features) { feature ->
+            startActivity(Intent(this, RecordListActivity::class.java).apply {
+                putExtra("type", feature.type)
+                putExtra("label", feature.label)
+                putExtra("userId", userId)
+            })
+        }
+    }
+
+    private fun fetchNaverNews() {
+        Thread {
+            try {
+                val request = Request.Builder()
+                    .url("https://openapi.naver.com/v1/search/news.json?query=철도&display=10&sort=date")
+                    .addHeader("X-Naver-Client-Id", NAVER_CLIENT_ID)
+                    .addHeader("X-Naver-Client-Secret", NAVER_CLIENT_SECRET)
+                    .build()
+                val response = client.newCall(request).execute()
+                val body = if (response.isSuccessful) response.body?.string() else null
+                response.close()
+                if (body != null) {
+                    val items = JSONObject(body).getJSONArray("items")
+                    val news = (0 until minOf(items.length(), NEWS_PREVIEW_COUNT)).map {
+                        val obj = items.getJSONObject(it)
+                        NewsItem(
+                            title = obj.getString("title"),
+                            date = obj.getString("pubDate").take(16),
+                            link = obj.optString("originallink").ifEmpty { obj.optString("link") }
+                        )
+                    }
+                    runOnUiThread { newsAdapter.update(news) }
+                }
+            } catch (e: Exception) {
+                Log.e("GlassAssist", "네이버 뉴스 실패", e)
+            }
+        }.start()
+    }
+
+    private fun fetchKorailNews() {
+        Thread {
+            try {
+                val request = Request.Builder()
+                    .url("https://openapi.naver.com/v1/search/news.json?query=코레일&display=10&sort=date")
+                    .addHeader("X-Naver-Client-Id", NAVER_CLIENT_ID)
+                    .addHeader("X-Naver-Client-Secret", NAVER_CLIENT_SECRET)
+                    .build()
+                val response = client.newCall(request).execute()
+                val body = if (response.isSuccessful) response.body?.string() else null
+                response.close()
+                if (body != null) {
+                    val items = JSONObject(body).getJSONArray("items")
+                    val news = (0 until minOf(items.length(), NEWS_PREVIEW_COUNT)).map {
+                        val obj = items.getJSONObject(it)
+                        NewsItem(
+                            title = obj.getString("title"),
+                            date = obj.getString("pubDate").take(16),
+                            link = obj.optString("originallink").ifEmpty { obj.optString("link") }
+                        )
+                    }
+                    runOnUiThread { newsAdapter.update(news) }
+                }
+            } catch (e: Exception) {
+                Log.e("GlassAssist", "KORAIL 뉴스 실패", e)
+            }
+        }.start()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         stopService(Intent(this, GlassAssistService::class.java))
         isMonitoring = false
         monitorRestartHandler.removeCallbacksAndMessages(null)
         standbyHandler.removeCallbacksAndMessages(null)
+        wakeTimeoutHandler.removeCallbacksAndMessages(null)
         continuousSpeechRecognizer?.destroy()
         glassFileObserver?.stopWatching()
+        mediaStoreObserver?.let { contentResolver.unregisterContentObserver(it) }
         unregisterReceiver(scoReceiver)
         if (isBluetoothScoOn) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -1329,6 +1635,7 @@ $handoverText
         tts.shutdown()
         messageServer?.stop()
         webSocket?.close(1000, "앱 종료")
+        dispatchWebSocket?.close(1000, "앱 종료")
         client.dispatcher.executorService.shutdown()
         audioRecord?.release()
         dbExecutor.shutdown()

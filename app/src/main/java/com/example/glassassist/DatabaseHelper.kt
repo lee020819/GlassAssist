@@ -5,7 +5,7 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 
-class DatabaseHelper(context: Context) : SQLiteOpenHelper(context, "glassassist.db", null, 1) {
+class DatabaseHelper(context: Context) : SQLiteOpenHelper(context, "glassassist.db", null, 2) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("""
@@ -44,9 +44,28 @@ class DatabaseHelper(context: Context) : SQLiteOpenHelper(context, "glassassist.
                 location TEXT NOT NULL,
                 videoUri TEXT
             )""")
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS handover_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                userId TEXT NOT NULL,
+                date TEXT NOT NULL,
+                time TEXT NOT NULL,
+                content TEXT NOT NULL
+            )""")
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            db.execSQL("""
+                CREATE TABLE IF NOT EXISTS handover_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    userId TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    time TEXT NOT NULL,
+                    content TEXT NOT NULL
+                )""")
+        }
+    }
 
     // 접객보호
     fun insertProtection(userId: String, date: String, time: String, timestampMs: Long, keyword: String) {
@@ -135,12 +154,43 @@ class DatabaseHelper(context: Context) : SQLiteOpenHelper(context, "glassassist.
         return list
     }
 
+    // 인수인계
+    fun insertHandover(userId: String, date: String, time: String, content: String) {
+        writableDatabase.insert("handover_records", null, ContentValues().apply {
+            put("userId", userId); put("date", date); put("time", time); put("content", content)
+        })
+    }
+
+    fun updateHandover(userId: String, oldContent: String, newContent: String) {
+        writableDatabase.execSQL(
+            "UPDATE handover_records SET content = ? WHERE userId = ? AND content = ?",
+            arrayOf(newContent, userId, oldContent)
+        )
+    }
+
+    fun deleteHandover(userId: String, content: String) {
+        writableDatabase.delete("handover_records", "userId = ? AND content = ?", arrayOf(userId, content))
+    }
+
+    fun getHandoverRecords(userId: String): List<HandoverData> {
+        val list = mutableListOf<HandoverData>()
+        readableDatabase.rawQuery(
+            "SELECT date, time, content FROM handover_records WHERE userId = ? ORDER BY id DESC",
+            arrayOf(userId)
+        ).use { c ->
+            while (c.moveToNext())
+                list.add(HandoverData(c.getString(0), c.getString(1), c.getString(2)))
+        }
+        return list
+    }
+
     fun deleteAllRecords(userId: String) {
         writableDatabase.let { db ->
             db.delete("protection_records", "userId = ?", arrayOf(userId))
             db.delete("qa_records", "userId = ?", arrayOf(userId))
             db.delete("video_records", "userId = ?", arrayOf(userId))
             db.delete("meter_records", "userId = ?", arrayOf(userId))
+            db.delete("handover_records", "userId = ?", arrayOf(userId))
         }
     }
 
@@ -148,4 +198,5 @@ class DatabaseHelper(context: Context) : SQLiteOpenHelper(context, "glassassist.
     data class QaData(val date: String, val time: String, val question: String, val answer: String)
     data class VideoData(val date: String, val time: String, val videoUri: String?)
     data class MeterData(val date: String, val time: String, val location: String, val videoUri: String?)
+    data class HandoverData(val date: String, val time: String, val content: String)
 }

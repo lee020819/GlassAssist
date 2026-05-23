@@ -1,58 +1,130 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:orientation="vertical"
     android:background="#F0F4F8">
 
+    <!-- 헤더 -->
     <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:padding="16dp">
+        android:layout_height="60dp"
+        android:background="#1A237E"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp">
 
-        <!-- 헤더 -->
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="GlassAssist"
+            android:textSize="20sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"/>
+
+        <TextView
+            android:id="@+id/status_text"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="● 연결 대기"
+            android:textSize="12sp"
+            android:textColor="#EF9A9A"/>
+
+        <TextView
+            android:id="@+id/btn_dispatch_qr"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="관제QR"
+            android:textSize="10sp"
+            android:textColor="#FFFFFF"
+            android:background="#33FFFFFF"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp"
+            android:paddingTop="3dp"
+            android:paddingBottom="3dp"
+            android:layout_marginStart="10dp"/>
+    </LinearLayout>
+
+    <androidx.core.widget.NestedScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:paddingBottom="16dp">
+            android:orientation="vertical"
+            android:padding="12dp">
 
-            <TextView
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="🚆 KNUT"
-                android:textSize="24sp"
-                android:textStyle="bold"
-                android:textColor="#1A237E"/>
-
-            <TextView
-                android:id="@+id/status_text"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="● 연결 대기"
-                android:textSize="12sp"
-                android:textColor="#F44336"/>
-        </LinearLayout>
-
-        <!-- 상단 2개 섹션 -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginBottom="12dp">
-
-            <!-- 질의응답 카드 -->
+            <!-- 뉴스 카드 -->
             <LinearLayout
-                android:layout_width="0dp"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginEnd="6dp"
                 android:background="@drawable/card_background"
                 android:elevation="4dp"
                 android:orientation="vertical"
-                android:padding="12dp">
+                android:layout_marginBottom="12dp">
+
+                <com.google.android.material.tabs.TabLayout
+                    android:id="@+id/tab_news"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    app:tabGravity="fill"
+                    app:tabMode="fixed"
+                    app:tabSelectedTextColor="#1A237E"
+                    app:tabTextColor="#757575"
+                    app:tabIndicatorColor="#1A237E"
+                    app:tabTextAppearance="@android:style/TextAppearance.Small"/>
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:background="#E0E0E0"/>
+
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/rv_news"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:nestedScrollingEnabled="false"/>
+            </LinearLayout>
+
+            <!-- 기능 그리드 카드 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@drawable/card_background"
+                android:elevation="4dp"
+                android:orientation="vertical"
+                android:padding="12dp"
+                android:layout_marginBottom="12dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="기능 메뉴"
+                    android:textSize="15sp"
+                    android:textStyle="bold"
+                    android:textColor="#1A237E"
+                    android:layout_marginBottom="8dp"/>
+
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/rv_features"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:nestedScrollingEnabled="false"/>
+            </LinearLayout>
+
+            <!-- 음성 인식 카드 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@drawable/card_background"
+                android:elevation="4dp"
+                android:orientation="vertical"
+                android:padding="12dp"
+                android:layout_marginBottom="12dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -65,298 +137,93 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="💬 질의응답"
-                        android:textSize="14sp"
+                        android:text="음성 인식"
+                        android:textSize="15sp"
                         android:textStyle="bold"
                         android:textColor="#1A237E"/>
 
                     <TextView
-                        android:id="@+id/btn_add_qa"
-                        android:layout_width="28dp"
-                        android:layout_height="28dp"
-                        android:text="+"
-                        android:textSize="18sp"
-                        android:textColor="#FFFFFF"
-                        android:gravity="center"
-                        android:background="@drawable/btn_add_background"/>
-                </LinearLayout>
-
-                <ListView
-                    android:id="@+id/list_qa"
-                    android:layout_width="match_parent"
-                    android:layout_height="200dp"
-                    android:divider="#E0E0E0"
-                    android:dividerHeight="1dp"/>
-            </LinearLayout>
-
-            <!-- 접객보호 카드 -->
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginStart="6dp"
-                android:background="@drawable/card_background_danger"
-                android:elevation="4dp"
-                android:orientation="vertical"
-                android:padding="12dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical"
-                    android:layout_marginBottom="8dp">
-
-                    <TextView
-                        android:layout_width="0dp"
+                        android:id="@+id/btn_standby"
+                        android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="🛡 접객보호"
-                        android:textSize="14sp"
-                        android:textStyle="bold"
-                        android:textColor="#B71C1C"/>
-
-                    <TextView
-                        android:id="@+id/btn_add_protection"
-                        android:layout_width="28dp"
-                        android:layout_height="28dp"
-                        android:text="+"
-                        android:textSize="18sp"
-                        android:textColor="#FFFFFF"
-                        android:gravity="center"
-                        android:background="@drawable/btn_add_background_red"/>
-                </LinearLayout>
-
-                <ListView
-                    android:id="@+id/list_protection"
-                    android:layout_width="match_parent"
-                    android:layout_height="200dp"
-                    android:divider="#FFCDD2"
-                    android:dividerHeight="1dp"/>
-            </LinearLayout>
-        </LinearLayout>
-
-        <!-- 하단 2개 섹션 -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal">
-
-            <!-- 실시간 영상전송 카드 -->
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginEnd="6dp"
-                android:background="@drawable/card_background_green"
-                android:elevation="4dp"
-                android:orientation="vertical"
-                android:padding="12dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical"
-                    android:layout_marginBottom="8dp">
-
-                    <TextView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="📹 실시간 영상전송"
+                        android:text="대기"
                         android:textSize="13sp"
-                        android:textStyle="bold"
-                        android:textColor="#1B5E20"/>
-
-                    <TextView
-                        android:id="@+id/btn_add_video"
-                        android:layout_width="28dp"
-                        android:layout_height="28dp"
-                        android:text="+"
-                        android:textSize="18sp"
                         android:textColor="#FFFFFF"
-                        android:gravity="center"
-                        android:background="@drawable/btn_add_background_green"/>
-                </LinearLayout>
-
-                <ListView
-                    android:id="@+id/list_video"
-                    android:layout_width="match_parent"
-                    android:layout_height="200dp"
-                    android:divider="#C8E6C9"
-                    android:dividerHeight="1dp"/>
-            </LinearLayout>
-
-            <!-- 계량기 기록 카드 -->
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginStart="6dp"
-                android:background="@drawable/card_background_orange"
-                android:elevation="4dp"
-                android:orientation="vertical"
-                android:padding="12dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical"
-                    android:layout_marginBottom="8dp">
+                        android:background="#1976D2"
+                        android:paddingStart="12dp"
+                        android:paddingEnd="12dp"
+                        android:paddingTop="6dp"
+                        android:paddingBottom="6dp"
+                        android:layout_marginEnd="6dp"/>
 
                     <TextView
-                        android:layout_width="0dp"
+                        android:id="@+id/btn_stop"
+                        android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="📊 계량기 기록"
-                        android:textSize="14sp"
-                        android:textStyle="bold"
-                        android:textColor="#E65100"/>
-
-                    <TextView
-                        android:id="@+id/btn_add_meter"
-                        android:layout_width="28dp"
-                        android:layout_height="28dp"
-                        android:text="+"
-                        android:textSize="18sp"
+                        android:text="중지"
+                        android:textSize="13sp"
                         android:textColor="#FFFFFF"
-                        android:gravity="center"
-                        android:background="@drawable/btn_add_background_orange"/>
+                        android:background="#F44336"
+                        android:paddingStart="12dp"
+                        android:paddingEnd="12dp"
+                        android:paddingTop="6dp"
+                        android:paddingBottom="6dp"/>
                 </LinearLayout>
 
-                <ListView
-                    android:id="@+id/list_meter"
+                <TextView
+                    android:id="@+id/stt_text"
                     android:layout_width="match_parent"
-                    android:layout_height="200dp"
-                    android:divider="#FFE0B2"
-                    android:dividerHeight="1dp"/>
-            </LinearLayout>
-        </LinearLayout>
-
-        <!-- 인수인계 카드 -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:background="@drawable/card_background"
-            android:elevation="4dp"
-            android:orientation="vertical"
-            android:padding="12dp">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:layout_marginBottom="8dp">
-
-                <TextView
-                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="📝 인수인계"
-                    android:textSize="14sp"
-                    android:textStyle="bold"
-                    android:textColor="#1A237E"/>
-
-                <TextView
-                    android:id="@+id/btn_add_handover"
-                    android:layout_width="28dp"
-                    android:layout_height="28dp"
-                    android:text="+"
-                    android:textSize="18sp"
-                    android:textColor="#FFFFFF"
-                    android:gravity="center"
-                    android:background="@drawable/btn_add_background"/>
-            </LinearLayout>
-
-            <ListView
-                android:id="@+id/list_handover"
-                android:layout_width="match_parent"
-                android:layout_height="120dp"
-                android:divider="#E0E0E0"
-                android:dividerHeight="1dp"/>
-        </LinearLayout>
-
-        <!-- 근무 종료 버튼 -->
-        <TextView
-            android:id="@+id/btn_clear_records"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="🗑 근무 종료 · 기록 지우기"
-            android:textSize="14sp"
-            android:textColor="#FFFFFF"
-            android:textStyle="bold"
-            android:gravity="center"
-            android:background="#546E7A"
-            android:paddingTop="12dp"
-            android:paddingBottom="12dp"/>
-
-        <!-- 현재 응답 표시 -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:background="@drawable/card_background"
-            android:elevation="4dp"
-            android:orientation="vertical"
-            android:padding="12dp">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:layout_marginBottom="8dp">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="🔊 현재 응답"
-                    android:textSize="14sp"
-                    android:textStyle="bold"
-                    android:textColor="#1A237E"/>
-
-                <TextView
-                    android:id="@+id/btn_standby"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="대기"
+                    android:text="대기 중..."
                     android:textSize="13sp"
-                    android:textColor="#FFFFFF"
-                    android:background="#1976D2"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:paddingTop="6dp"
-                    android:paddingBottom="6dp"
-                    android:layout_marginEnd="6dp"/>
-
-                <TextView
-                    android:id="@+id/btn_stop"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="■ 중지"
-                    android:textSize="13sp"
-                    android:textColor="#FFFFFF"
-                    android:background="#F44336"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:paddingTop="6dp"
-                    android:paddingBottom="6dp"/>
+                    android:textColor="#37474F"
+                    android:minLines="2"/>
             </LinearLayout>
 
+            <!-- 근무 종료 버튼 -->
             <TextView
-                android:id="@+id/stt_text"
+                android:id="@+id/btn_clear_records"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="대기 중..."
-                android:textSize="13sp"
-                android:textColor="#37474F"
-                android:minLines="3"/>
+                android:text="근무 종료 · 기록 지우기"
+                android:textSize="14sp"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold"
+                android:gravity="center"
+                android:background="#546E7A"
+                android:paddingTop="12dp"
+                android:paddingBottom="12dp"/>
+
+            <!-- 기존 코드 호환용 숨김 뷰 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <TextView android:id="@+id/btn_add_qa"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+                <TextView android:id="@+id/btn_add_protection"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+                <TextView android:id="@+id/btn_add_video"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+                <TextView android:id="@+id/btn_add_meter"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+                <TextView android:id="@+id/btn_add_handover"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+                <ListView android:id="@+id/list_qa"
+                    android:layout_width="match_parent" android:layout_height="1dp"/>
+                <ListView android:id="@+id/list_protection"
+                    android:layout_width="match_parent" android:layout_height="1dp"/>
+                <ListView android:id="@+id/list_video"
+                    android:layout_width="match_parent" android:layout_height="1dp"/>
+                <ListView android:id="@+id/list_meter"
+                    android:layout_width="match_parent" android:layout_height="1dp"/>
+                <ListView android:id="@+id/list_handover"
+                    android:layout_width="match_parent" android:layout_height="1dp"/>
+            </LinearLayout>
+
         </LinearLayout>
-    </LinearLayout>
-</ScrollView>
+    </androidx.core.widget.NestedScrollView>
+
+</LinearLayout>

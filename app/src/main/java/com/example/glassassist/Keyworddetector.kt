@@ -4,16 +4,24 @@ import android.content.Context
 import android.util.Log
 import org.json.JSONObject
 
-/**
- * 위험 키워드 감지기
- * assets/danger_keywords.json 파일을 읽어서
- * 입력 텍스트에 위험 키워드가 포함됐는지 감지
- */
 class KeywordDetector(private val context: Context) {
 
     companion object {
         private const val TAG = "KeywordDetector"
         private const val KEYWORDS_FILE = "danger_keywords.json"
+
+        private val POSITIVE_CONTEXT_WORDS = listOf(
+            "맛있", "재밌", "웃기", "좋아", "행복", "즐거", "신나",
+            "너무 좋", "완전 좋", "대박", "쩐다", "노래", "영화", "게임", "음식", "맛집"
+        )
+
+        private val NORMALIZATION_MAP = mapOf(
+            "ㅅㅂ" to "씨발",
+            "ㅂㅅ" to "병신",
+            "ㅈㄹ" to "지랄",
+            "ㄲㅈ" to "꺼져",
+            "ㅁㅊ" to "미쳐"
+        )
     }
 
     data class DetectionResult(
@@ -21,7 +29,8 @@ class KeywordDetector(private val context: Context) {
         val severity: String,
         val categoryName: String,
         val matchedKeyword: String,
-        val alertLevel: String
+        val alertLevel: String,
+        val contextSafe: Boolean = false
     )
 
     private data class KeywordCategory(
@@ -94,13 +103,58 @@ class KeywordDetector(private val context: Context) {
         }
     }
 
+    private fun normalizeText(text: String): String {
+        var normalized = text.replace(" ", "").lowercase()
+        NORMALIZATION_MAP.forEach { (from, to) ->
+            normalized = normalized.replace(from, to)
+        }
+        return normalized
+    }
+
+    private fun isPositiveContext(text: String): Boolean {
+        return POSITIVE_CONTEXT_WORDS.any { text.contains(it) }
+    }
+
+    private fun isCriticalCategory(categoryId: String): Boolean {
+        return categoryId in listOf("threat", "physical_threat", "extreme_danger", "suicide_threat")
+    }
+
     fun detect(text: String): DetectionResult {
-        val normalizedText = text.replace(" ", "")
+        val normalizedText = normalizeText(text)
+        val isPositive = isPositiveContext(text)
 
         for (category in categories) {
             for (keyword in category.keywords) {
-                val normalizedKeyword = keyword.replace(" ", "")
+                val normalizedKeyword = normalizeText(keyword)
                 if (normalizedText.contains(normalizedKeyword)) {
+
+                    // critical 카테고리는 문맥 무시하고 항상 감지
+                    if (isCriticalCategory(category.id)) {
+                        val alertLevel = alertLevels[category.severity] ?: "local_alert"
+                        Log.d(TAG, "긴급 키워드 감지! 카테고리: ${category.name}, 키워드: $keyword")
+                        return DetectionResult(
+                            detected = true,
+                            severity = category.severity,
+                            categoryName = category.name,
+                            matchedKeyword = keyword,
+                            alertLevel = alertLevel,
+                            contextSafe = false
+                        )
+                    }
+
+                    // 긍정적 문맥이면 위협 아님으로 처리
+                    if (isPositive) {
+                        Log.d(TAG, "긍정적 문맥 감지 - 위협 아님: $keyword")
+                        return DetectionResult(
+                            detected = false,
+                            severity = "none",
+                            categoryName = "",
+                            matchedKeyword = keyword,
+                            alertLevel = "",
+                            contextSafe = true
+                        )
+                    }
+
                     val alertLevel = alertLevels[category.severity] ?: "local_alert"
                     Log.d(TAG, "위험 키워드 감지! 카테고리: ${category.name}, 키워드: $keyword")
                     return DetectionResult(
@@ -108,7 +162,8 @@ class KeywordDetector(private val context: Context) {
                         severity = category.severity,
                         categoryName = category.name,
                         matchedKeyword = keyword,
-                        alertLevel = alertLevel
+                        alertLevel = alertLevel,
+                        contextSafe = false
                     )
                 }
             }
