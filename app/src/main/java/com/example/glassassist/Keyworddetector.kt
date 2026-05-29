@@ -10,6 +10,14 @@ class KeywordDetector(private val context: Context) {
         private const val TAG = "KeywordDetector"
         private const val KEYWORDS_FILE = "danger_keywords.json"
 
+        val serverKeywords: MutableList<String> = mutableListOf()
+
+        fun setServerKeywords(keywords: List<String>) {
+            serverKeywords.clear()
+            serverKeywords.addAll(keywords)
+            Log.d(TAG, "서버 키워드 업데이트: ${keywords.size}개")
+        }
+
         private val POSITIVE_CONTEXT_WORDS = listOf(
             "맛있", "재밌", "웃기", "좋아", "행복", "즐거", "신나",
             "너무 좋", "완전 좋", "대박", "쩐다", "노래", "영화", "게임", "음식", "맛집"
@@ -166,6 +174,20 @@ class KeywordDetector(private val context: Context) {
                         contextSafe = false
                     )
                 }
+            }
+        }
+
+        for (keyword in serverKeywords) {
+            val normalizedKeyword = normalizeText(keyword)
+            if (normalizedText.contains(normalizedKeyword)) {
+                Log.d(TAG, "서버 키워드 감지: $keyword")
+                return DetectionResult(
+                    detected = true,
+                    severity = "high",
+                    categoryName = "관제실 지정 키워드",
+                    matchedKeyword = keyword,
+                    alertLevel = "local_alert"
+                )
             }
         }
 

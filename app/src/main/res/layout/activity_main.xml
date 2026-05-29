@@ -34,6 +34,16 @@
             android:textColor="#EF9A9A"/>
 
         <TextView
+            android:id="@+id/glass_status_text"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="● 글라스 미연결"
+            android:textSize="12sp"
+            android:textColor="#EF9A9A"
+            android:layout_marginStart="8dp"
+            android:layout_marginEnd="4dp"/>
+
+        <TextView
             android:id="@+id/btn_dispatch_qr"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"

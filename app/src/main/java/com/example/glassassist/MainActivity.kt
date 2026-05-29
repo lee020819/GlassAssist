@@ -30,6 +30,7 @@ import android.util.Log
 import android.widget.ArrayAdapter
 import android.widget.ListView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import okhttp3.MediaType.Companion.toMediaType
@@ -62,6 +63,15 @@ import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.tabs.TabLayout
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import com.meta.wearable.dat.camera.Stream
+import com.meta.wearable.dat.camera.addStream
+import com.meta.wearable.dat.camera.types.PhotoData
+import com.meta.wearable.dat.camera.types.StreamConfiguration
+import com.meta.wearable.dat.camera.types.VideoFrame
+import com.meta.wearable.dat.core.Wearables
+import com.meta.wearable.dat.core.selectors.AutoDeviceSelector
+import kotlinx.coroutines.launch
+import androidx.lifecycle.lifecycleScope
 
 class MainActivity : AppCompatActivity() {
 
@@ -126,24 +136,26 @@ class MainActivity : AppCompatActivity() {
     private var isScoConnecting = false
     private var scoKeepAliveTrack: AudioTrack? = null
     private var isHandlingDanger = false
+    private var protectionStreamJob: kotlinx.coroutines.Job? = null
     private var isTranslationMode = false
-    private var isGeminiMode = false
+    private var glassStream: Stream? = null
     private val scoRetryHandler = Handler(Looper.getMainLooper())
     private var glassFileObserver: FileObserver? = null
     private var mediaStoreObserver: ContentObserver? = null
     private val processedGlassFiles = mutableSetOf<String>()
 
     private var isMeterMode = false
-    private var isAwake = false
-    private val wakeTimeoutHandler = Handler(Looper.getMainLooper())
+    private var pendingMeterItem: RecordItem? = null
+    private var isHandoverMode = false
+    private var recognitionListener: RecognitionListener? = null
 
     private enum class InspectionStep { IDLE, WAITING_TYPE, WAITING_LOCATION }
     private var inspectionStep = InspectionStep.IDLE
     private var inspectionFacility = ""
     private var inspectionType = ""
     private val inspectionTypeMap = mapOf(
-        "일상" to "일상점검", "정기" to "정기점검", "수시" to "수시점검",
-        "특별" to "특별점검", "긴급" to "긴급점검"
+        "일상" to "일상점검", "정기" to "정기점검", "전기" to "정기점검",
+        "수시" to "수시점검", "특별" to "특별점검", "긴급" to "긴급점검"
     )
     private var inspectionTriggerKeywords: List<String> = emptyList()
     @Volatile private var activeCall: okhttp3.Call? = null
@@ -156,21 +168,21 @@ class MainActivity : AppCompatActivity() {
     private val handoverList = mutableListOf<String>()
     private lateinit var handoverAdapter: ArrayAdapter<String>
     private lateinit var newsAdapter: NewsAdapter
+    private lateinit var glassStatusText: TextView
 
     companion object {
         private const val NAVER_CLIENT_ID = "YkmvsxAbXEj1AOeuGW0n"
         private const val NAVER_CLIENT_SECRET = "H4fKvtP0Fj"
-        private const val GEMINI_API_KEY = "AIzaSyDcLzHO0Fe4TlhFQwYEl9YAkfoOOLfQfKE"
+        private const val TELEGRAM_BOT_TOKEN = "8968419516:AAHfm3bGV9EzAxN8Wda3UPoNXPhRN2igBLQ"
+        private const val TELEGRAM_CHAT_ID = "8633866058"
         private const val NEWS_PREVIEW_COUNT = 3
         private val META_AI_DIR = "/storage/emulated/0/Download/Meta AI"
-        private val WAKE_WORDS = listOf("안녕글래스", "안녕 글래스", "안녕글레스", "안녕 글레스")
         // 안경 파일명 형식: 20260517_141507_hash.mp4
         private val GLASS_FILE_REGEX = Regex("""^(\d{8})_(\d{6})_[0-9a-f]+\.(mp4|mov|jpg|jpeg|png)$""")
         val dispatchLog = mutableListOf<String>()
         var lastDispatchUrl: String? = null
         val translationLog = mutableListOf<String>()
         var translationModeActive = false
-        val aiLog = mutableListOf<String>()
     }
 
     private val standbyHandler = Handler(Looper.getMainLooper())
@@ -181,9 +193,9 @@ class MainActivity : AppCompatActivity() {
                 standbyHandler.postDelayed(this, 1000)
                 return
             }
-            tts.speak("안녕 글래스라고 불러주세요", TextToSpeech.QUEUE_FLUSH, null, "standby")
-            runOnUiThread { sttText.text = "'안녕 글래스'라고 불러주세요\n[터치하면 음성 녹음]" }
-            monitorRestartHandler.postDelayed({ resumeContinuousMonitoring() }, 2000)
+            tts.speak("음성인식 대기 중입니다", TextToSpeech.QUEUE_FLUSH, null, "standby")
+            runOnUiThread { sttText.text = "음성인식 대기 중...\n[터치하면 음성 녹음]" }
+            monitorRestartHandler.postDelayed({ resumeContinuousMonitoring() }, 3500)
         }
     }
 
@@ -196,6 +208,10 @@ class MainActivity : AppCompatActivity() {
                     isBluetoothScoOn = true
                     Log.d("GlassAssist", "안경 SCO 연결 완료")
                     reinitTtsForSco()
+                    runOnUiThread {
+                        glassStatusText.text = "● 글라스 연결됨"
+                        glassStatusText.setTextColor(0xFF4CAF50.toInt())
+                    }
                 }
                 AudioManager.SCO_AUDIO_STATE_DISCONNECTED -> {
                     isScoConnecting = false
@@ -203,6 +219,10 @@ class MainActivity : AppCompatActivity() {
                     stopScoKeepAlive()
                     Log.d("GlassAssist", "안경 SCO 끊김, 재연결 시도")
                     startScoRetry()
+                    runOnUiThread {
+                        glassStatusText.text = "● 글라스 미연결"
+                        glassStatusText.setTextColor(0xFFEF9A9A.toInt())
+                    }
                 }
             }
         }
@@ -313,8 +333,9 @@ class MainActivity : AppCompatActivity() {
         loadInspectionKeywords()
 
         statusText = findViewById(R.id.status_text)
+        glassStatusText = findViewById(R.id.glass_status_text)
         sttText = findViewById(R.id.stt_text)
-        sttText.text = "'안녕 글래스'라고 불러주세요\n[터치하면 음성 녹음]"
+        sttText.text = "대기 중...\n[터치하면 음성 녹음]"
 
         if (userPrefs.userId == null) showUserIdDialog()
 
@@ -359,7 +380,7 @@ class MainActivity : AppCompatActivity() {
             pauseContinuousMonitoring()
             tts.speak("음성인식 대기 중입니다", TextToSpeech.QUEUE_FLUSH, null, "standby")
             sttText.text = "음성인식 대기 중...\n[터치하면 음성 녹음]"
-            monitorRestartHandler.postDelayed({ resumeContinuousMonitoring() }, 2000)
+            monitorRestartHandler.postDelayed({ resumeContinuousMonitoring() }, 3500)
         }
 
         findViewById<TextView>(R.id.btn_stop).setOnClickListener {
@@ -367,9 +388,14 @@ class MainActivity : AppCompatActivity() {
             tts.stop()
             if (isRecording) stopRecordingAndSend()
             isHandlingDanger = false
+            isTranslationMode = false; translationModeActive = false
+            inspectionStep = InspectionStep.IDLE
+            isMeterMode = false
+            stopProtectionStream()
             pauseContinuousMonitoring()
-            sttText.text = "중지됨.\n[터치하면 음성 녹음]"
-            standbyHandler.postDelayed(standbyRunnable, 3_000)
+            sttText.text = "음성인식 대기 중...\n[터치하면 음성 녹음]"
+            tts.speak("대기중입니다", TextToSpeech.QUEUE_FLUSH, null, "stop_standby")
+            monitorRestartHandler.postDelayed({ resumeContinuousMonitoring() }, 3500)
         }
 
         sttText.setOnClickListener {
@@ -391,6 +417,7 @@ class MainActivity : AppCompatActivity() {
             requestPermissions()
         }
         startForegroundService(Intent(this, GlassAssistService::class.java))
+        initGlassStream()
     }
 
     private fun showUserIdDialog() {
@@ -434,6 +461,10 @@ class MainActivity : AppCompatActivity() {
                     meterList.add(RecordItem(r.date, r.time, location = r.location, videoUri = r.videoUri))
                     meterAdapter.add("${r.date} ${r.time} - ${r.location}")
                 }
+                pendingMeterItem = meterList.firstOrNull { it.videoUri == null }
+                if (pendingMeterItem != null) {
+                    Log.d("GlassAssist", "pendingMeterItem 복원: ${pendingMeterItem?.location}")
+                }
                 protectionAdapter.notifyDataSetChanged()
                 qaAdapter.notifyDataSetChanged()
                 videoAdapter.notifyDataSetChanged()
@@ -447,8 +478,8 @@ class MainActivity : AppCompatActivity() {
     private fun registerGlassMediaObserver() {
         val dir = java.io.File(META_AI_DIR)
         if (!dir.exists()) {
-            Log.w("GlassAssist", "Meta AI 폴더 없음: $META_AI_DIR")
-            return
+            Log.w("GlassAssist", "Meta AI 폴더 없음, 생성 시도: $META_AI_DIR")
+            dir.mkdirs()
         }
 
         glassFileObserver = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -492,7 +523,7 @@ class MainActivity : AppCompatActivity() {
 
     @Suppress("DEPRECATION")
     private fun checkNewGlassMedia() {
-        val cutoffSec = (System.currentTimeMillis() / 1000) - 30
+        val cutoffSec = (System.currentTimeMillis() / 1000) - 300
         queryGlassFiles(
             MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
             MediaStore.Video.Media.DISPLAY_NAME,
@@ -618,14 +649,14 @@ class MainActivity : AppCompatActivity() {
                 this, arrayOf(file.absolutePath), arrayOf("image/jpeg")
             ) { _, uri ->
                 val imageUri = uri?.toString() ?: return@scanFile
-                if (isMeterMode) {
-                    val savedLocation = isMeterLocation
+                val pending = pendingMeterItem
+                if (pending != null && pending.videoUri == null) {
+                    pending.videoUri = imageUri
+                    pendingMeterItem = null
                     isMeterMode = false
+                    isMeterLocation = ""
                     resumeContinuousMonitoring()
-                    val now = Date()
-                    val item = RecordItem(date = dateFormat.format(now), time = timeFormat.format(now), location = savedLocation, videoUri = imageUri)
-                    meterList.add(0, item)
-                    dbExecutor.execute { db.insertMeter(userId, item.date, item.time, savedLocation, imageUri) }
+                    dbExecutor.execute { db.updateMeterPhoto(userId, pending.date, pending.time, pending.location, imageUri) }
                     runOnUiThread {
                         meterAdapter.clear()
                         meterList.forEach { meterAdapter.add("${it.date} ${it.time} - ${it.location}") }
@@ -634,7 +665,7 @@ class MainActivity : AppCompatActivity() {
                         tts.speak("사진이 저장되었습니다", TextToSpeech.QUEUE_FLUSH, null, "insp_saved")
                     }
                 } else {
-                    // 일반 모드 → 실시간 영상전송 탭에 저장
+                    // 대기 중인 점검 기록 없음 → 실시간 영상전송 탭에 저장
                     runOnUiThread {
                         sttText.text = "안경 사진이 저장되었습니다.\n[터치하면 음성 녹음]"
                         tts.speak("안경 사진이 저장되었습니다", TextToSpeech.QUEUE_FLUSH, null, "photo_${System.currentTimeMillis()}")
@@ -657,20 +688,28 @@ class MainActivity : AppCompatActivity() {
         }
 
         // 점검 모드 → 영상도 점검 기록으로 저장
-        if (isMeterMode) {
+        val pendingForVideo = pendingMeterItem
+        if (isMeterMode || (pendingForVideo != null && pendingForVideo.videoUri == null)) {
             isMeterMode = false
             resumeContinuousMonitoring()
             android.media.MediaScannerConnection.scanFile(
                 this, arrayOf(file.absolutePath), arrayOf("video/mp4")
             ) { _, uri ->
                 val videoUri = uri?.toString() ?: return@scanFile
-                val now = Date()
-                val item = RecordItem(
-                    date = dateFormat.format(now), time = timeFormat.format(now),
-                    location = isMeterLocation, videoUri = videoUri
-                )
-                meterList.add(0, item)
-                dbExecutor.execute { db.insertMeter(userId, item.date, item.time, isMeterLocation, videoUri) }
+                if (pendingForVideo != null && pendingForVideo.videoUri == null) {
+                    pendingForVideo.videoUri = videoUri
+                    pendingMeterItem = null
+                    isMeterLocation = ""
+                    dbExecutor.execute { db.updateMeterPhoto(userId, pendingForVideo.date, pendingForVideo.time, pendingForVideo.location, videoUri) }
+                } else {
+                    val now = Date()
+                    val item = RecordItem(
+                        date = dateFormat.format(now), time = timeFormat.format(now),
+                        location = isMeterLocation, videoUri = videoUri
+                    )
+                    meterList.add(0, item)
+                    dbExecutor.execute { db.insertMeter(userId, item.date, item.time, isMeterLocation, videoUri) }
+                }
                 runOnUiThread {
                     meterAdapter.clear()
                     meterList.forEach { meterAdapter.add("${it.date} ${it.time} - ${it.location}") }
@@ -686,7 +725,6 @@ class MainActivity : AppCompatActivity() {
         val bestMatch = protectionList
             .filter { it.timestampMs > 0 }
             .minByOrNull { abs(it.timestampMs - recordingTimeMs) }
-            ?.takeIf { abs(it.timestampMs - recordingTimeMs) <= 15_000 }
 
         val newDiff = if (bestMatch != null) abs(bestMatch.timestampMs - recordingTimeMs) else Long.MAX_VALUE
 
@@ -747,6 +785,7 @@ class MainActivity : AppCompatActivity() {
                 if (oldUri != null) addVideoRecord(oldUri)  // 기존 영상 → 실시간 영상전송
                 bestMatch.videoUri = storedUri
                 isHandlingDanger = false
+                stopProtectionStream()
                 protectionAdapter.clear()
                 protectionList.forEach { protectionAdapter.add("${it.date} ${it.time} ${it.keyword}") }
                 protectionAdapter.notifyDataSetChanged()
@@ -842,9 +881,10 @@ class MainActivity : AppCompatActivity() {
 
             AlertDialog.Builder(this)
                 .setTitle("근무 종료")
-                .setMessage("📋 근무 일지\n\n$report\n\n기록을 삭제하시겠습니까?")
-                .setPositiveButton("삭제") { _, _ ->
+                .setMessage("📋 근무 일지\n\n$report\n\n이메일 발송 후 기록을 삭제하시겠습니까?")
+                .setPositiveButton("발송 후 삭제") { _, _ ->
                     saveWorkReport(report)
+                    sendWorkReportEmail(report)
                     dbExecutor.execute { db.deleteAllRecords(userId) }
                     protectionList.clear(); protectionAdapter.clear()
                     qaList.clear(); qaAdapter.clear()
@@ -854,6 +894,9 @@ class MainActivity : AppCompatActivity() {
                     sttText.text = "기록이 삭제되었습니다.\n[터치하면 음성 녹음]"
                     standbyHandler.removeCallbacks(standbyRunnable)
                     standbyHandler.postDelayed(standbyRunnable, 3000)
+                }
+                .setNeutralButton("이메일만 발송") { _, _ ->
+                    sendWorkReportEmail(report)
                 }
                 .setNegativeButton("취소", null)
                 .show()
@@ -971,6 +1014,34 @@ class MainActivity : AppCompatActivity() {
             protectionList.forEach { protectionAdapter.add("${it.date} ${it.time} ${it.keyword}") }
             protectionAdapter.notifyDataSetChanged()
         }
+        sendTelegramAlert(keyword, item.date, item.time)
+    }
+
+    private fun sendTelegramAlert(keyword: String, date: String, time: String) {
+        val message = "🚨 [GlassAssist 위험 감지]\n역무원 ID: $userId\n키워드: $keyword\n시각: $date $time"
+        Thread {
+            try {
+                val body = org.json.JSONObject()
+                    .put("chat_id", TELEGRAM_CHAT_ID)
+                    .put("text", message)
+                    .toString()
+                    .toRequestBody("application/json".toMediaType())
+                val request = Request.Builder()
+                    .url("https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage")
+                    .post(body)
+                    .build()
+                val response = client.newCall(request).execute()
+                runOnUiThread {
+                    if (response.isSuccessful)
+                        Toast.makeText(this, "텔레그램 관제실 알림 발송됨", Toast.LENGTH_SHORT).show()
+                    else
+                        Toast.makeText(this, "텔레그램 발송 실패 (${response.code})", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Log.e("GlassAssist", "텔레그램 알림 실패: ${e.message}")
+                runOnUiThread { Toast.makeText(this, "텔레그램 연결 실패", Toast.LENGTH_SHORT).show() }
+            }
+        }.start()
     }
 
     private fun addVideoRecord(uri: String? = null) {
@@ -1022,6 +1093,28 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    private fun fetchDangerKeywordsFromServer() {
+        val wsUrl = userPrefs.dispatchWsUrl ?: return
+        val httpUrl = wsUrl.replace(Regex("^ws://"), "http://").substringBefore("/ws")
+        Thread {
+            try {
+                val request = Request.Builder().url("$httpUrl/keywords").build()
+                val response = client.newCall(request).execute()
+                if (response.isSuccessful) {
+                    val arr = JSONObject(response.body?.string() ?: "").optJSONArray("keywords") ?: return@Thread
+                    val list = (0 until arr.length()).map { arr.getString(it) }
+                    KeywordDetector.setServerKeywords(list)
+                    Log.d("GlassAssist", "서버 키워드 로드: ${list.size}개")
+                    runOnUiThread {
+                        Toast.makeText(this, "위험 키워드 ${list.size}개 동기화됨", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("GlassAssist", "키워드 로드 실패: ${e.message}")
+            }
+        }.start()
+    }
+
     private fun connectDispatchWebSocket() {
         val url = userPrefs.dispatchWsUrl ?: return
         dispatchWebSocket?.close(1000, "재연결")
@@ -1029,6 +1122,7 @@ class MainActivity : AppCompatActivity() {
         dispatchWebSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 lastDispatchUrl = url
+                fetchDangerKeywordsFromServer()
             }
             override fun onMessage(webSocket: WebSocket, text: String) {
                 try {
@@ -1048,6 +1142,11 @@ class MainActivity : AppCompatActivity() {
                             val from = json.optString("from", "관제실")
                             dispatchLog.add(0, "[$now] 📥 $from: 음성 수신")
                             playDispatchAudio(audioData)
+                        }
+                        "keywords_updated" -> {
+                            val arr = json.optJSONArray("keywords") ?: return
+                            val list = (0 until arr.length()).map { arr.getString(it) }
+                            KeywordDetector.setServerKeywords(list)
                         }
                     }
                 } catch (e: Exception) {
@@ -1237,7 +1336,7 @@ class MainActivity : AppCompatActivity() {
                     addProtectionRecord(detection.matchedKeyword)
                     startDangerAlert()
                     runOnUiThread {
-                        sttText.text = "긴급 상황 감지!\n\n안경 버튼을 눌러 영상을 녹화하세요.\nMeta AI 앱에서 '가져오기'를 누르면 자동 연결됩니다."
+                        sttText.text = "긴급 상황 감지!\n\n안경 버튼을 눌러 영상을 녹화하세요.\n녹화 후 '대기'라고 말하면 다른 기능 사용 가능.\n영상은 동기화되면 자동 저장됩니다."
                         tts.speak(alertMsg, TextToSpeech.QUEUE_FLUSH, null, "alert_${System.currentTimeMillis()}")
                     }
                 } else {
@@ -1261,10 +1360,39 @@ class MainActivity : AppCompatActivity() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) return
         isMonitoring = true
         continuousSpeechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-        continuousSpeechRecognizer?.setRecognitionListener(object : RecognitionListener {
+        recognitionListener = object : RecognitionListener {
             override fun onResults(results: Bundle?) {
-                val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                var text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull() ?: run { scheduleMonitorRestart(); return }
+
+                text = correctSttText(text)
+
+                runOnUiThread { sttText.text = "[STT] $text" }
+
+                // 전역 리셋: 어떤 상태에서든 "대기" 또는 "중지" 외치면 초기화
+                if (text.replace(" ", "").let {
+                        it.contains("대기") || it.contains("중지") || it.contains("그만")
+                    }) {
+                    resetToStandby()
+                    return
+                }
+
+                // 인수인계 내용 수신
+                if (isHandoverMode) {
+                    isHandoverMode = false
+                    val now = Date()
+                    dbExecutor.execute { db.insertHandover(userId, dateFormat.format(now), timeFormat.format(now), text) }
+                    handoverList.add(text)
+                    runOnUiThread {
+                        handoverAdapter.clear()
+                        handoverList.forEachIndexed { i, s -> handoverAdapter.add("${i+1}. $s") }
+                        handoverAdapter.notifyDataSetChanged()
+                        sttText.text = "인수인계 저장됨: $text\n[터치하면 음성 녹음]"
+                        tts.speak("인수인계가 저장되었습니다", TextToSpeech.QUEUE_FLUSH, null, "handover_saved")
+                    }
+                    scheduleMonitorRestart()
+                    return
+                }
 
                 // 점검 유형 음성 응답 처리
                 if (inspectionStep == InspectionStep.WAITING_TYPE) {
@@ -1285,27 +1413,34 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 if (isTranslationMode && !isHandlingDanger && text.length >= 2) {
-                    val normalized = text.replace(" ", "").lowercase()
-                    if (normalized.contains("번역종료") || normalized.contains("통역종료") ||
-                        (normalized.contains("beon") && normalized.contains("jong")) ||
-                        (normalized.contains("trans") && normalized.contains("stop"))) {
+                    val allResults = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: listOf(text)
+                    val isEndCommand = allResults.any { r ->
+                        val n = r.replace(" ", "").lowercase()
+                        n.contains("번역종료") || n.contains("통역종료") ||
+                            (n.contains("번역") && n.contains("종료")) ||
+                            n.contains("stop") || n.contains("exit") || n.contains("end")
+                    }
+                    if (isEndCommand) {
                         isTranslationMode = false
                         translationModeActive = false
                         runOnUiThread {
-                            sttText.text = "'안녕 글래스'라고 불러주세요\n[터치하면 음성 녹음]"
+                            sttText.text = "대기 중...\n[터치하면 음성 녹음]"
                             tts.speak("번역 모드를 종료합니다", TextToSpeech.QUEUE_FLUSH, null, "tmode_off")
                         }
                         resumeContinuousMonitoring()
                         return
                     }
                     translateAndSpeak(text)
-                    scheduleMonitorRestart()
-                    return
-                }
-
-                if (isGeminiMode && !isHandlingDanger && text.length >= 2) {
-                    isGeminiMode = false
-                    askGemini(text)
+                    val waitForTts = object : Runnable {
+                        override fun run() {
+                            if (tts.isSpeaking) {
+                                monitorRestartHandler.postDelayed(this, 500)
+                            } else {
+                                monitorRestartHandler.postDelayed({ startListeningIntent() }, 600)
+                            }
+                        }
+                    }
+                    monitorRestartHandler.postDelayed(waitForTts, 1000)
                     return
                 }
 
@@ -1317,12 +1452,9 @@ class MainActivity : AppCompatActivity() {
                         addProtectionRecord(detection.matchedKeyword)
                         startDangerAlert()
                         runOnUiThread {
-                            sttText.text = "긴급 상황 감지!\n\n안경 버튼을 눌러 영상을 녹화하세요.\nMeta AI 앱에서 '가져오기'를 누르면 자동 연결됩니다."
+                            sttText.text = "긴급 상황 감지!\n\n안경 버튼을 눌러 영상을 녹화하세요.\n녹화 후 '대기'라고 말하면 다른 기능 사용 가능.\n영상은 동기화되면 자동 저장됩니다."
                             tts.speak(detector.getAlertMessage(detection), TextToSpeech.QUEUE_FLUSH, null, "alert_${System.currentTimeMillis()}")
                         }
-                    } else if (tts.isSpeaking) {
-                        scheduleMonitorRestart()
-                        return
                     } else if (inspectionTriggerKeywords.any { text.contains(it) }) {
                         inspectionFacility = inspectionTriggerKeywords.first { text.contains(it) }
                         inspectionStep = InspectionStep.WAITING_TYPE
@@ -1336,36 +1468,17 @@ class MainActivity : AppCompatActivity() {
                     } else if (text.replace(" ", "").let { it.contains("통역시작") || it.contains("번역시작") }) {
                         isTranslationMode = true
                         translationModeActive = true
-                        isAwake = false
-                        wakeTimeoutHandler.removeCallbacksAndMessages(null)
                         runOnUiThread {
                             sttText.text = "번역 모드 시작\n외국어로 말씀해 주세요"
                             tts.speak("번역 모드를 시작합니다", TextToSpeech.QUEUE_FLUSH, null, "tmode_on")
                         }
-                    } else if (text.replace(" ", "").let {
-                            it.equals("ai", ignoreCase = true) || it.contains("에이아이")
-                        }) {
-                        isGeminiMode = true
-                        isAwake = false
-                        wakeTimeoutHandler.removeCallbacksAndMessages(null)
+                    } else if (text.replace(" ", "").contains("인수인계")) {
+                        isHandoverMode = true
                         runOnUiThread {
-                            sttText.text = "AI 모드\n질문하세요"
-                            tts.speak("네, 질문하세요", TextToSpeech.QUEUE_FLUSH, null, "gemini_wake")
+                            sttText.text = "인수인계 내용을 말씀해 주세요"
+                            tts.speak("인수인계 내용을 말씀해 주세요", TextToSpeech.QUEUE_FLUSH, null, "handover_prompt")
                         }
-                    } else if (WAKE_WORDS.any { text.replace(" ", "").contains(it.replace(" ", "")) }) {
-                        isAwake = true
-                        wakeTimeoutHandler.removeCallbacksAndMessages(null)
-                        wakeTimeoutHandler.postDelayed({
-                            isAwake = false
-                            runOnUiThread { sttText.text = "'안녕 글래스'라고 불러주세요\n[터치하면 음성 녹음]" }
-                        }, 10_000)
-                        runOnUiThread {
-                            sttText.text = "네, 말씀하세요\n[터치하면 음성 녹음]"
-                            tts.speak("네, 말씀하세요", TextToSpeech.QUEUE_FLUSH, null, "wake_${System.currentTimeMillis()}")
-                        }
-                    } else if (isAwake && text.length >= 2) {
-                        isAwake = false
-                        wakeTimeoutHandler.removeCallbacksAndMessages(null)
+                    } else if (text.length >= 5) {
                         sendTextToServer(text)
                         return
                     }
@@ -1374,27 +1487,17 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onPartialResults(partialResults: Bundle?) {
-                if (isHandlingDanger) return
                 val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull() ?: return
-                // TTS 응답 중 음성 중지 명령
-                if (tts.isSpeaking && (text.contains("중지") || text.contains("대기") || text.contains("취소") || text.contains("그만") || text.contains("멈춰"))) {
-                    tts.stop()
-                    runOnUiThread { sttText.text = "응답 중지됨.\n[터치하면 음성 녹음]" }
-                    scheduleMonitorRestart()
+                // 전역 리셋: 어떤 상태에서든(접객보호 포함) "대기/중지/그만/취소/멈춰" 감지 시 즉시 초기화
+                if (text.replace(" ", "").let {
+                        it.contains("대기") || it.contains("중지") || it.contains("그만") ||
+                        it.contains("취소") || it.contains("멈춰")
+                    }) {
+                    resetToStandby()
                     return
                 }
-                // 음성 Q&A 중지/대기
-                if (activeCall != null && (text.contains("중지") || text.contains("대기") || text.contains("취소"))) {
-                    activeCall?.cancel()
-                    activeCall = null
-                    runOnUiThread {
-                        sttText.text = "Q&A 중단됨.\n[터치하면 음성 녹음]"
-                        tts.speak("중단했습니다", TextToSpeech.QUEUE_FLUSH, null, "qa_cancel")
-                    }
-                    resumeContinuousMonitoring()
-                    return
-                }
+                if (isHandlingDanger) return
                 val detector = KeywordDetector(this@MainActivity)
                 val detection = detector.detect(text)
                 if (detection.detected) {
@@ -1402,14 +1505,14 @@ class MainActivity : AppCompatActivity() {
                     addProtectionRecord(detection.matchedKeyword)
                     startDangerAlert()
                     runOnUiThread {
-                        sttText.text = "긴급 상황 감지!\n\n안경 버튼을 눌러 영상을 녹화하세요.\nMeta AI 앱에서 '가져오기'를 누르면 자동 연결됩니다."
+                        sttText.text = "긴급 상황 감지!\n\n안경 버튼을 눌러 영상을 녹화하세요.\n녹화 후 '대기'라고 말하면 다른 기능 사용 가능.\n영상은 동기화되면 자동 저장됩니다."
                         tts.speak(detector.getAlertMessage(detection), TextToSpeech.QUEUE_FLUSH, null, "alert_${System.currentTimeMillis()}")
                     }
                 }
             }
 
             override fun onError(error: Int) {
-                if (!isHandlingDanger) scheduleMonitorRestart()
+                scheduleMonitorRestart()
             }
             override fun onReadyForSpeech(params: Bundle?) {}
             override fun onBeginningOfSpeech() {}
@@ -1417,27 +1520,137 @@ class MainActivity : AppCompatActivity() {
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onEndOfSpeech() {}
             override fun onEvent(eventType: Int, params: Bundle?) {}
-        })
+        }
+        continuousSpeechRecognizer?.setRecognitionListener(recognitionListener)
         startListeningIntent()
         startScoRetry()
     }
 
-    private fun activateInspectionCameraMode(type: String, facility: String, location: String) {
-        isMeterMode = true
-        isMeterLocation = "$type / $facility / $location"
-        pauseContinuousMonitoring()
-        runOnUiThread {
-            sttText.text = "📊 $type - $facility\n위치: $location\n\n사진 또는 영상을 촬영하고\nMeta AI 앱에서 가져오세요."
-            tts.speak("사진 또는 영상을 촬영하고 Meta AI 앱에서 가져오세요", TextToSpeech.QUEUE_FLUSH, null, "insp_camera")
-        }
-        Handler(Looper.getMainLooper()).postDelayed({
-            if (isMeterMode) {
-                isMeterMode = false
-                isMeterLocation = ""
-                resumeContinuousMonitoring()
-                runOnUiThread { sttText.text = "점검 촬영 취소됨.\n[터치하면 음성 녹음]" }
+    private fun initGlassStream() {
+        Thread {
+            try {
+                Wearables.initialize(this).onSuccess {
+                    Wearables.createSession(AutoDeviceSelector()).onSuccess { session ->
+                        session.addStream(StreamConfiguration()).onSuccess { stream ->
+                            stream.start()
+                            glassStream = stream
+                            Log.d("GlassAssist", "안경 SDK 스트림 연결 완료")
+                        }.onFailure { err ->
+                            Log.e("GlassAssist", "스트림 생성 실패: $err")
+                        }
+                    }.onFailure { err ->
+                        Log.e("GlassAssist", "세션 생성 실패: $err")
+                    }
+                }.onFailure { err ->
+                    Log.e("GlassAssist", "SDK 초기화 실패: $err")
+                }
+            } catch (e: Exception) {
+                Log.e("GlassAssist", "안경 SDK 초기화 오류: ${e.message}")
             }
-        }, 60_000L)
+        }.start()
+    }
+
+    private fun savePhotoAndRecord(photoData: PhotoData, location: String) {
+        try {
+            val now = Date()
+            val fileName = "meter_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(now)}.jpg"
+            val file = File(getExternalFilesDir("glass_media") ?: filesDir, fileName).also {
+                it.parentFile?.mkdirs()
+            }
+            when (photoData) {
+                is PhotoData.Bitmap -> file.outputStream().use { out ->
+                    photoData.bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, out)
+                }
+                is PhotoData.HEIC -> {
+                    val buf = photoData.data
+                    val bytes = ByteArray(buf.remaining())
+                    buf.get(bytes)
+                    file.writeBytes(bytes)
+                }
+            }
+            val imageUri = FileProvider.getUriForFile(this, "${packageName}.provider", file).toString()
+            isMeterMode = false
+            val pending = pendingMeterItem
+            pendingMeterItem = null
+            if (pending != null) {
+                pending.videoUri = imageUri
+                dbExecutor.execute { db.updateMeterPhoto(userId, pending.date, pending.time, pending.location, imageUri) }
+            } else {
+                val item = RecordItem(date = dateFormat.format(now), time = timeFormat.format(now), location = location, videoUri = imageUri)
+                meterList.add(0, item)
+                dbExecutor.execute { db.insertMeter(userId, item.date, item.time, location, imageUri) }
+            }
+            runOnUiThread {
+                meterAdapter.clear()
+                meterList.forEach { meterAdapter.add("${it.date} ${it.time} - ${it.location}") }
+                meterAdapter.notifyDataSetChanged()
+                sttText.text = "📊 점검 사진 저장됨\n[터치하면 음성 녹음]"
+                tts.speak("사진이 저장되었습니다", TextToSpeech.QUEUE_FLUSH, null, "meter_sdk_saved")
+                standbyHandler.removeCallbacks(standbyRunnable)
+                standbyHandler.postDelayed(standbyRunnable, 3000)
+            }
+            resumeContinuousMonitoring()
+        } catch (e: Exception) {
+            Log.e("GlassAssist", "SDK 사진 저장 실패: ${e.message}")
+            runOnUiThread { tts.speak("저장 실패, 직접 촬영해 주세요", TextToSpeech.QUEUE_FLUSH, null, "meter_fail") }
+            resumeContinuousMonitoring()
+        }
+    }
+
+    private fun addMeterRecord(location: String): RecordItem {
+        val now = Date()
+        val item = RecordItem(date = dateFormat.format(now), time = timeFormat.format(now), location = location)
+        pendingMeterItem = item
+        meterList.add(0, item)
+        dbExecutor.execute { db.insertMeter(userId, item.date, item.time, location, null) }
+        runOnUiThread {
+            meterAdapter.clear()
+            meterList.forEach { meterAdapter.add("${it.date} ${it.time} - ${it.location}") }
+            meterAdapter.notifyDataSetChanged()
+        }
+        return item
+    }
+
+    private fun activateInspectionCameraMode(type: String, facility: String, location: String) {
+        val loc = "$type / $facility / $location"
+        isMeterLocation = loc
+        addMeterRecord(loc)
+        pauseContinuousMonitoring()
+
+        val stream = glassStream
+        if (stream != null) {
+            isMeterMode = false
+            runOnUiThread {
+                sttText.text = "📊 $type - $facility\n위치: $location\n\n안경으로 촬영 중..."
+                tts.speak("사진을 촬영합니다", TextToSpeech.QUEUE_FLUSH, null, "insp_sdk")
+            }
+            lifecycleScope.launch {
+                val result = stream.capturePhoto()
+                result.onSuccess { photoData -> savePhotoAndRecord(photoData, loc) }
+                result.onFailure { _ ->
+                    Log.w("GlassAssist", "SDK 촬영 실패 → 수동 모드 전환")
+                    isMeterMode = true
+                    runOnUiThread {
+                        sttText.text = "📊 $type - $facility\n위치: $location\n\n안경 버튼을 누르거나\nMeta AI 앱에서 가져오세요."
+                        tts.speak("직접 촬영해 주세요", TextToSpeech.QUEUE_FLUSH, null, "insp_manual")
+                    }
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        if (isMeterMode) { isMeterMode = false; isMeterLocation = ""; resumeContinuousMonitoring() }
+                    }, 60_000L)
+                }
+            }
+        } else {
+            isMeterMode = true
+            runOnUiThread {
+                sttText.text = "📊 $type - $facility\n위치: $location\n\n사진 또는 영상을 촬영하고\nMeta AI 앱에서 가져오세요."
+                tts.speak("사진 또는 영상을 촬영하고 Meta AI 앱에서 가져오세요", TextToSpeech.QUEUE_FLUSH, null, "insp_camera")
+            }
+            Handler(Looper.getMainLooper()).postDelayed({
+                if (isMeterMode) { isMeterMode = false; isMeterLocation = ""; resumeContinuousMonitoring()
+                    runOnUiThread { sttText.text = "점검 촬영 취소됨.\n[터치하면 음성 녹음]" }
+                }
+            }, 60_000L)
+        }
     }
 
     private fun launchPhoneCamera(facility: String, inspectionType: String, location: String) {
@@ -1468,13 +1681,104 @@ class MainActivity : AppCompatActivity() {
 
     // 위험 감지 시 TTS 알림만 (영상은 안경 버튼으로 직접 촬영)
     private fun startDangerAlert() {
-        // 5분 후 isHandlingDanger 자동 초기화 (안경 영상 연결 안 된 경우 대비)
+        startProtectionStream()
         Handler(Looper.getMainLooper()).postDelayed({
             if (isHandlingDanger) {
                 isHandlingDanger = false
+                stopProtectionStream()
                 Log.d("GlassAssist", "위험 처리 타임아웃 - 초기화")
             }
         }, 300_000L)
+    }
+
+    private fun startProtectionStream() {
+        val keyword = protectionList.firstOrNull()?.keyword ?: ""
+        dispatchWebSocket?.send(
+            org.json.JSONObject()
+                .put("type", "protection_alert")
+                .put("from", userId)
+                .put("keyword", keyword)
+                .toString()
+        )
+        val stream = glassStream ?: return
+        protectionStreamJob = lifecycleScope.launch {
+            launch {
+                stream.videoStream.collect { frame: VideoFrame ->
+                    val ws = dispatchWebSocket ?: return@collect
+                    val buf = frame.buffer.duplicate()
+                    val bytes = ByteArray(buf.remaining()).also { buf.get(it) }
+                    val frameJson = org.json.JSONObject()
+                    frameJson.put("type", "video_frame")
+                    frameJson.put("data", android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP))
+                    frameJson.put("isCodecConfig", frame.isCodecConfig)
+                    frameJson.put("pts", frame.presentationTimeUs)
+                    frameJson.put("from", userId)
+                    ws.send(frameJson.toString())
+                }
+            }
+            launch {
+                var linkedToRecord = false
+                while (true) {
+                    kotlinx.coroutines.delay(4000)
+                    try {
+                        stream.capturePhoto().onSuccess { photoData ->
+                            val bytes = when (photoData) {
+                                is PhotoData.Bitmap -> {
+                                    val baos = java.io.ByteArrayOutputStream()
+                                    photoData.bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, baos)
+                                    baos.toByteArray()
+                                }
+                                is PhotoData.HEIC -> {
+                                    val buf = photoData.data.duplicate()
+                                    ByteArray(buf.remaining()).also { buf.get(it) }
+                                }
+                            }
+                            // 관제 서버로 전송
+                            dispatchWebSocket?.send(
+                                org.json.JSONObject()
+                                    .put("type", "protection_snapshot")
+                                    .put("data", android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP))
+                                    .put("from", userId)
+                                    .toString()
+                            )
+                            // 첫 스냅샷을 로컬 저장 후 접객보호 기록에 자동 연결
+                            if (!linkedToRecord) {
+                                linkedToRecord = true
+                                val now = Date()
+                                val fileName = "protection_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(now)}.jpg"
+                                val dir = getExternalFilesDir("protection") ?: filesDir
+                                dir.mkdirs()
+                                val file = File(dir, fileName)
+                                file.writeBytes(bytes)
+                                val imageUri = FileProvider.getUriForFile(this@MainActivity, "${packageName}.provider", file).toString()
+                                val target = protectionList.firstOrNull { it.videoUri == null }
+                                if (target != null) {
+                                    target.videoUri = imageUri
+                                    dbExecutor.execute { db.linkProtectionVideo(userId, target.timestampMs, imageUri) }
+                                    runOnUiThread {
+                                        protectionAdapter.clear()
+                                        protectionList.forEach { protectionAdapter.add("${it.date} ${it.time} ${it.keyword}") }
+                                        protectionAdapter.notifyDataSetChanged()
+                                        sttText.text = "📸 접객보호 사진 자동 저장됨\n[터치하면 음성 녹음]"
+                                        tts.speak("증거 사진이 자동으로 저장되었습니다", TextToSpeech.QUEUE_FLUSH, null, "protection_saved")
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w("GlassAssist", "스냅샷 전송 실패: ${e.message}")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun stopProtectionStream() {
+        protectionStreamJob?.cancel()
+        protectionStreamJob = null
+        dispatchWebSocket?.send(
+            org.json.JSONObject().put("type", "protection_end").put("from", userId).toString()
+        )
     }
 
     private fun sendTextToServer(question: String) {
@@ -1567,6 +1871,7 @@ class MainActivity : AppCompatActivity() {
                     dispatchLog.add(0, "[$now] 📤 나 → 관제실: 음성 전송")
                     sttText.text = "관제실에 전송됐습니다.\n[터치하면 음성 녹음]"
                     tts.speak("관제실에 전송됐습니다", TextToSpeech.QUEUE_FLUSH, null, "dispatch_sent")
+                    startActivity(Intent(this@MainActivity, DispatchActivity::class.java))
                 } else {
                     tts.speak("관제실 연결을 확인하세요", TextToSpeech.QUEUE_FLUSH, null, "dispatch_fail")
                 }
@@ -1599,88 +1904,168 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun translateAndSpeak(sourceText: String, sourceLang: String = "en") {
+    private fun getDemoLocationHint(translated: String, langCode: String): Pair<String, java.util.Locale>? {
+        val locale = when (langCode) {
+            "en" -> java.util.Locale.ENGLISH
+            "zh-CN", "zh-TW" -> java.util.Locale.CHINESE
+            "ja" -> java.util.Locale.JAPANESE
+            "de" -> java.util.Locale.GERMAN
+            "fr" -> java.util.Locale.FRENCH
+            else -> java.util.Locale.ENGLISH
+        }
+        val hint = when {
+            translated.contains("화장실") -> when (langCode) {
+                "en" -> "The nearest restroom is on the 3rd floor, north side."
+                "zh-CN", "zh-TW" -> "最近的洗手间在3楼北侧。"
+                "ja" -> "最寄りのトイレは3階北側です。"
+                "de" -> "Die nächste Toilette ist im 3. Stock auf der Nordseite."
+                "fr" -> "Les toilettes les plus proches sont au 3ème étage, côté nord."
+                else -> "The nearest restroom is on the 3rd floor."
+            }
+            translated.contains("출구") -> when (langCode) {
+                "en" -> "The nearest exit is Exit number 2."
+                "zh-CN", "zh-TW" -> "最近的出口是2号出口。"
+                "ja" -> "最寄りの出口は2番出口です。"
+                "de" -> "Der nächste Ausgang ist Ausgang Nummer 2."
+                "fr" -> "La sortie la plus proche est la sortie numéro 2."
+                else -> "The nearest exit is Exit number 2."
+            }
+            translated.contains("매표소") || translated.contains("승차권") || translated.contains("티켓") -> when (langCode) {
+                "en" -> "The ticket office is on the 1st floor, center."
+                "zh-CN", "zh-TW" -> "售票处在1楼中央。"
+                "ja" -> "切符売り場は1階中央です。"
+                else -> "The ticket office is on the 1st floor."
+            }
+            translated.contains("엘리베이터") -> when (langCode) {
+                "en" -> "The elevator is at the east end of the platform."
+                "zh-CN", "zh-TW" -> "电梯在站台东端。"
+                "ja" -> "エレベーターはホームの東端にあります。"
+                else -> "The elevator is at the east end of the platform."
+            }
+            translated.contains("환승") -> when (langCode) {
+                "en" -> "Transfer to Line 2 is in zone B."
+                "zh-CN", "zh-TW" -> "换乘2号线请前往B区。"
+                "ja" -> "2号線への乗り換えはBゾーンです。"
+                else -> "Transfer is in zone B."
+            }
+            translated.contains("편의점") -> when (langCode) {
+                "en" -> "The convenience store is on the 2nd floor, center."
+                "zh-CN", "zh-TW" -> "便利店在2楼中央。"
+                "ja" -> "コンビニは2階中央にあります。"
+                else -> "The convenience store is on the 2nd floor."
+            }
+            translated.contains("분실") || translated.contains("잃어버") -> when (langCode) {
+                "en" -> "Please go to the lost and found at the station office on the 1st floor."
+                "zh-CN", "zh-TW" -> "请前往1楼站务室的失物招领处。"
+                "ja" -> "1階駅務室の遺失物センターへお越しください。"
+                else -> "Please go to the lost and found on the 1st floor."
+            }
+            translated.contains("응급") || translated.contains("다쳤") || translated.contains("아파") -> when (langCode) {
+                "en" -> "Please wait. I will guide you to the station office immediately."
+                "zh-CN", "zh-TW" -> "请稍等，我立刻带您去站务室。"
+                "ja" -> "少々お待ちください。すぐに駅務室へご案内します。"
+                else -> "Please wait. I will help you immediately."
+            }
+            else -> null
+        }
+        return hint?.let { Pair(it, locale) }
+    }
+
+    private fun detectLanguage(text: String): String {
+        var koCount = 0; var jaCount = 0; var zhCount = 0
+        for (ch in text) {
+            val cp = ch.code
+            when {
+                cp in 0xAC00..0xD7A3 -> koCount++
+                cp in 0x3040..0x30FF -> jaCount++
+                cp in 0x4E00..0x9FFF -> zhCount++
+            }
+        }
+        val total = koCount + jaCount + zhCount
+        if (total > 0) {
+            return when {
+                koCount > jaCount && koCount > zhCount -> "ko"
+                jaCount >= zhCount -> "ja"
+                else -> "zh-CN"
+            }
+        }
+        return try {
+            val body = okhttp3.FormBody.Builder().add("query", text).build()
+            val request = Request.Builder()
+                .url("https://openapi.naver.com/v1/papago/detectLangs")
+                .addHeader("X-Naver-Client-Id", NAVER_CLIENT_ID)
+                .addHeader("X-Naver-Client-Secret", NAVER_CLIENT_SECRET)
+                .post(body)
+                .build()
+            val response = client.newCall(request).execute()
+            if (response.isSuccessful) JSONObject(response.body?.string() ?: "").optString("langCode", "en")
+            else "en"
+        } catch (e: Exception) { "en" }
+    }
+
+    private fun translateAndSpeak(sourceText: String) {
         Thread {
             try {
-                val formBody = okhttp3.FormBody.Builder()
-                    .add("source", sourceLang)
-                    .add("target", "ko")
-                    .add("text", sourceText)
-                    .build()
+                val langCode = detectLanguage(sourceText)
+                if (langCode == "ko") {
+                    runOnUiThread { sttText.text = "[입력]: $sourceText\n(한국어 감지 — 번역 생략)" }
+                    return@Thread
+                }
+                val langNames = mapOf(
+                    "en" to "영어", "zh-CN" to "중국어(간체)", "zh-TW" to "중국어(번체)",
+                    "ja" to "일본어", "de" to "독일어", "fr" to "프랑스어",
+                    "es" to "스페인어", "ru" to "러시아어", "vi" to "베트남어",
+                    "th" to "태국어", "id" to "인도네시아어"
+                )
+                val encodedText = java.net.URLEncoder.encode(sourceText, "UTF-8")
                 val request = Request.Builder()
-                    .url("https://openapi.naver.com/v1/papago/n2mt")
-                    .addHeader("X-Naver-Client-Id", NAVER_CLIENT_ID)
-                    .addHeader("X-Naver-Client-Secret", NAVER_CLIENT_SECRET)
-                    .post(formBody)
+                    .url("https://api.mymemory.translated.net/get?q=$encodedText&langpair=$langCode|ko")
+                    .get()
                     .build()
                 val response = client.newCall(request).execute()
                 if (response.isSuccessful) {
                     val json = JSONObject(response.body?.string() ?: "")
-                    val translated = json.getJSONObject("message")
-                        .getJSONObject("result")
-                        .getString("translatedText")
+                    val translated = json.getJSONObject("responseData").getString("translatedText")
+                    val langLabel = langNames[langCode] ?: langCode
                     val now = timeFormat.format(java.util.Date())
-                    translationLog.add(0, "[$now] $sourceText\n        → $translated")
+                    translationLog.add(0, "[$now] ($langLabel) $sourceText\n        → $translated")
+                    val hintPair = getDemoLocationHint(translated, langCode)
+                    val translateId = "translate_${System.currentTimeMillis()}"
                     runOnUiThread {
-                        sttText.text = "[외국인]: $sourceText\n[번역]: $translated"
-                        tts.speak(translated, TextToSpeech.QUEUE_FLUSH, null, "translate_${System.currentTimeMillis()}")
+                        sttText.text = "[외국인 ($langLabel)]: $sourceText\n[번역]: $translated"
+                        if (hintPair != null) {
+                            val (hintText, hintLocale) = hintPair
+                            tts.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                                override fun onStart(utteranceId: String?) {}
+                                override fun onDone(utteranceId: String?) {
+                                    if (utteranceId == translateId) {
+                                        tts.setLanguage(hintLocale)
+                                        tts.speak(hintText, TextToSpeech.QUEUE_FLUSH, null, "hint_${System.currentTimeMillis()}")
+                                    } else if (utteranceId?.startsWith("hint_") == true) {
+                                        tts.setLanguage(java.util.Locale.KOREAN)
+                                        tts.setOnUtteranceProgressListener(null)
+                                    }
+                                }
+                                override fun onError(utteranceId: String?) {
+                                    tts.setLanguage(java.util.Locale.KOREAN)
+                                    tts.setOnUtteranceProgressListener(null)
+                                }
+                            })
+                        }
+                        tts.speak(translated, TextToSpeech.QUEUE_FLUSH, null, translateId)
+                    }
+                } else {
+                    Log.e("GlassAssist", "MyMemory 번역 API 오류: ${response.code}")
+                    runOnUiThread {
+                        sttText.text = "번역 실패 (오류 ${response.code})\n[터치하면 음성 녹음]"
+                        tts.speak("번역에 실패했습니다", TextToSpeech.QUEUE_FLUSH, null, "translate_fail")
                     }
                 }
             } catch (e: Exception) {
-                Log.e("GlassAssist", "Papago 번역 실패: ${e.message}")
-            }
-        }.start()
-    }
-
-    private fun askGemini(question: String) {
-        pauseContinuousMonitoring()
-        runOnUiThread { sttText.text = "Gemini AI 처리 중...\n$question" }
-        Thread {
-            try {
-                val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$GEMINI_API_KEY"
-                val body = JSONObject().apply {
-                    put("systemInstruction", JSONObject().apply {
-                        put("parts", JSONObject().apply {
-                            put("text", "너는 서울역 역무원의 스마트 글래스 비서다. " +
-                                "소음이 심한 현장이므로 모든 답변은 친절하고 정중하되, " +
-                                "무조건 1~2문장 이내로 요약해서 핵심만 극도로 짧게 대답해라. " +
-                                "서론과 미사여구는 절대 금지한다.")
-                        })
-                    })
-                    put("contents", org.json.JSONArray().put(
-                        JSONObject().put("parts", org.json.JSONArray().put(
-                            JSONObject().put("text", question)
-                        ))
-                    ))
-                }.toString().toRequestBody("application/json".toMediaType())
-                val request = Request.Builder().url(url).post(body).build()
-                val response = client.newCall(request).execute()
-                val answer = if (response.isSuccessful) {
-                    try {
-                        val json = JSONObject(response.body?.string() ?: "")
-                        json.getJSONArray("candidates")
-                            .getJSONObject(0)
-                            .getJSONObject("content")
-                            .getJSONArray("parts")
-                            .getJSONObject(0)
-                            .getString("text")
-                    } catch (e: Exception) { "응답 파싱 실패" }
-                } else "AI 오류 (${response.code})"
-                val now = timeFormat.format(java.util.Date())
-                aiLog.add(0, "[$now] Q: $question\n       A: $answer")
-                addQaRecord(question, answer)
+                Log.e("GlassAssist", "MyMemory 번역 실패: ${e.message}")
                 runOnUiThread {
-                    sttText.text = "Q: $question\n\nA: $answer"
-                    tts.speak(answer, TextToSpeech.QUEUE_FLUSH, null, "gemini_${System.currentTimeMillis()}")
-                    standbyHandler.removeCallbacks(standbyRunnable)
-                    standbyHandler.postDelayed(standbyRunnable, 3000)
-                    resumeContinuousMonitoring()
-                }
-            } catch (e: Exception) {
-                Log.e("GlassAssist", "Gemini 오류: ${e.message}")
-                runOnUiThread {
-                    tts.speak("AI 연결에 실패했습니다", TextToSpeech.QUEUE_FLUSH, null, "gemini_err")
-                    resumeContinuousMonitoring()
+                    sttText.text = "번역 연결 실패\n[터치하면 음성 녹음]"
+                    tts.speak("번역에 실패했습니다", TextToSpeech.QUEUE_FLUSH, null, "translate_fail")
                 }
             }
         }.start()
@@ -1688,25 +2073,87 @@ class MainActivity : AppCompatActivity() {
 
     private fun startListeningIntent() {
         if (!isMonitoring || isRecording) return
+        if (!isBluetoothScoOn) return
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, if (isTranslationMode) "en-US" else "ko-KR")
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ko-KR")
+            if (isTranslationMode) {
+                putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("en-US", "zh-CN", "ja-JP"))
+            }
+            putExtra("android.speech.extra.EXTRA_PREFER_OFFLINE", true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, if (isTranslationMode) 5 else 1)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 800L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 500L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, if (isTranslationMode) 1500L else 800L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, if (isTranslationMode) 1200L else 500L)
         }
         continuousSpeechRecognizer?.cancel()
         continuousSpeechRecognizer?.startListening(intent)
     }
 
     private fun scheduleMonitorRestart() {
-        monitorRestartHandler.postDelayed({ startListeningIntent() }, 200)
+        monitorRestartHandler.postDelayed({
+            continuousSpeechRecognizer?.cancel()
+            continuousSpeechRecognizer?.destroy()
+            continuousSpeechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+            continuousSpeechRecognizer?.setRecognitionListener(recognitionListener)
+            startListeningIntent()
+        }, 200)
     }
 
     private fun pauseContinuousMonitoring() {
         monitorRestartHandler.removeCallbacksAndMessages(null)
         continuousSpeechRecognizer?.stopListening()
+    }
+
+    private fun correctSttText(text: String): String {
+        val numMap = mapOf(
+            "일" to "1", "이" to "2", "삼" to "3", "사" to "4", "오" to "5",
+            "육" to "6", "칠" to "7", "팔" to "8", "구" to "9", "십" to "10"
+        )
+        val locationSuffixes = listOf(
+            "번 승강장", "번 출구", "번 게이트", "번 홈", "번 플랫폼",
+            "번 출입구", "번 창구", "번 층", "번 계단", "번 엘리베이터", "번 에스컬레이터"
+        )
+        // "일본 승강장"처럼 숫자+본 형태의 특수 오인식 처리
+        var result = text.replace("일본 승강장", "1번 승강장")
+        for ((kor, num) in numMap) {
+            for (suffix in locationSuffixes) {
+                result = result.replace("$kor$suffix", "$num$suffix")
+            }
+        }
+        // "1로" → "1층" 교정
+        result = result.replace(Regex("(\\d+)로$"), "$1층")
+        result = result.replace(Regex("(\\d+)로 "), "$1층 ")
+        // "27" → "2층" 교정 (층을 7로 오인식)
+        result = result.replace(Regex("(\\d+)7$"), "$1층")
+        result = result.replace(Regex("(\\d+)7 "), "$1층 ")
+        return result
+    }
+
+    private fun resetToStandby() {
+        tts.stop()
+        activeCall?.cancel(); activeCall = null
+        isHandlingDanger = false
+        isTranslationMode = false; translationModeActive = false
+        inspectionStep = InspectionStep.IDLE
+        isMeterMode = false
+        isHandoverMode = false
+        stopProtectionStream()
+        pauseContinuousMonitoring()
+        runOnUiThread {
+            sttText.text = "음성인식 대기 중...\n[터치하면 음성 녹음]"
+            tts.speak("대기중입니다", TextToSpeech.QUEUE_FLUSH, null, "reset_standby")
+        }
+        val waitForTts = object : Runnable {
+            override fun run() {
+                if (tts.isSpeaking) {
+                    monitorRestartHandler.postDelayed(this, 300)
+                } else {
+                    resumeContinuousMonitoring()
+                }
+            }
+        }
+        monitorRestartHandler.postDelayed(waitForTts, 300)
     }
 
     private fun resumeContinuousMonitoring() {
@@ -1796,6 +2243,30 @@ ${if (videoList.isEmpty()) "없음" else videoList.joinToString("\n") { "  [${it
 📝 인수인계 사항
 $handoverText
         """.trimIndent()
+    }
+
+    private fun sendWorkReportEmail(report: String) {
+        Thread {
+            try {
+                val json = JSONObject()
+                    .put("userId", userId)
+                    .put("report", report)
+                    .toString()
+                    .toRequestBody("application/json".toMediaType())
+                val request = Request.Builder().url("$apiUrl/send-report").post(json).build()
+                val response = client.newCall(request).execute()
+                runOnUiThread {
+                    if (response.isSuccessful)
+                        android.widget.Toast.makeText(this, "근무 일지가 이메일로 발송되었습니다.", android.widget.Toast.LENGTH_SHORT).show()
+                    else
+                        android.widget.Toast.makeText(this, "이메일 발송 실패 (${response.code})", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    android.widget.Toast.makeText(this, "서버 연결 실패: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.start()
     }
 
     private fun saveWorkReport(report: String) {
@@ -1892,8 +2363,8 @@ $handoverText
             FeatureItem(R.drawable.ic_handover, "인수인계", "handover"),
             FeatureItem(R.drawable.ic_dispatch, "관제실", "dispatch"),
             FeatureItem(R.drawable.ic_translate, "번역", "translate"),
-            FeatureItem(R.drawable.ic_ai, "AI 보조", "ai"),
-            FeatureItem(0, "", "empty"),
+            FeatureItem(R.drawable.ic_schedule, "점검스케줄", "schedule"),
+            FeatureItem(R.drawable.ic_stats, "보호통계", "stats"),
         )
         val rvFeatures = findViewById<RecyclerView>(R.id.rv_features)
         rvFeatures.layoutManager = GridLayoutManager(this, 3)
@@ -1902,8 +2373,8 @@ $handoverText
             when (feature.type) {
                 "dispatch" -> startActivity(Intent(this, DispatchActivity::class.java))
                 "translate" -> startActivity(Intent(this, TranslateActivity::class.java))
-                "ai" -> startActivity(Intent(this, AiActivity::class.java))
-                "empty" -> {}
+                "schedule" -> startActivity(Intent(this, InspectionScheduleActivity::class.java))
+                "stats" -> startActivity(Intent(this, ProtectionStatsActivity::class.java))
                 else -> startActivity(Intent(this, RecordListActivity::class.java).apply {
                     putExtra("type", feature.type)
                     putExtra("label", feature.label)
@@ -1977,7 +2448,6 @@ $handoverText
         isMonitoring = false
         monitorRestartHandler.removeCallbacksAndMessages(null)
         standbyHandler.removeCallbacksAndMessages(null)
-        wakeTimeoutHandler.removeCallbacksAndMessages(null)
         scoRetryHandler.removeCallbacksAndMessages(null)
         stopScoKeepAlive()
         continuousSpeechRecognizer?.destroy()
@@ -1995,6 +2465,7 @@ $handoverText
         }
         tts.stop()
         tts.shutdown()
+        glassStream?.close()
         messageServer?.stop()
         webSocket?.close(1000, "앱 종료")
         dispatchWebSocket?.close(1000, "앱 종료")

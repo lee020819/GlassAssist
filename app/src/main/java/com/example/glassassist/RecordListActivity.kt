@@ -106,6 +106,11 @@ class RecordListActivity : AppCompatActivity() {
         loadAndShow()
     }
 
+    override fun onResume() {
+        super.onResume()
+        loadAndShow()
+    }
+
     private fun showMeterAddDialog() {
         val facilityInput = EditText(this).apply {
             hint = "시설물 입력 (예: 소화기, 에스컬레이터)"

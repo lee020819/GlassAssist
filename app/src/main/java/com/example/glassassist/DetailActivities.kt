@@ -134,7 +134,37 @@ class MeterDetailActivity : AppCompatActivity() {
 
         findViewById<TextView>(R.id.tv_date).text = intent.getStringExtra("date") ?: "-"
         findViewById<TextView>(R.id.tv_time).text = intent.getStringExtra("time") ?: "-"
-        findViewById<TextView>(R.id.tv_location).text = intent.getStringExtra("location") ?: "-"
+
+        val inspectionType = intent.getStringExtra("inspectionType") ?: ""
+        val facility = intent.getStringExtra("facility") ?: ""
+        val locationText = listOf(inspectionType, facility, intent.getStringExtra("location") ?: "-")
+            .filter { it.isNotEmpty() }
+            .joinToString(" / ")
+        val tvLocation = findViewById<TextView>(R.id.tv_location)
+        tvLocation.text = locationText
+
+        findViewById<TextView>(R.id.btn_edit_location).setOnClickListener {
+            val input = EditText(this).apply {
+                setText(tvLocation.text)
+                setPadding(48, 24, 48, 24)
+            }
+            AlertDialog.Builder(this)
+                .setTitle("📍 위치 수정")
+                .setView(input)
+                .setPositiveButton("저장") { _, _ ->
+                    val newLocation = input.text.toString().trim()
+                    if (newLocation.isNotEmpty()) {
+                        tvLocation.text = newLocation
+                        val db = DatabaseHelper(this)
+                        val userId = UserPreferences(this).userId ?: "미설정"
+                        val date = intent.getStringExtra("date") ?: ""
+                        val time = intent.getStringExtra("time") ?: ""
+                        db.updateMeterLocation(userId, date, time, newLocation)
+                    }
+                }
+                .setNegativeButton("취소", null)
+                .show()
+        }
 
         val meterNumber = intent.getStringExtra("meterNumber") ?: "-"
         findViewById<TextView>(R.id.tv_meter_number).text = meterNumber
