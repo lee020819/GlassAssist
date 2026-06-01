@@ -22,3 +22,9 @@ obj/
 # Keystore
 *.jks
 *.keystore
+
+# PyInstaller (관제 서버 exe 빌드 산출물 - 대용량)
+dist/
+build/
+*.spec
+*.exe

@@ -59,7 +59,6 @@
         <activity android:name=".HandoverDetailActivity" android:exported="false"/>
         <activity android:name=".DispatchActivity" android:exported="false"/>
         <activity android:name=".TranslateActivity" android:exported="false"/>
-        <activity android:name=".InspectionScheduleActivity" android:exported="false"/>
         <activity android:name=".ProtectionStatsActivity" android:exported="false"/>
 
         <provider

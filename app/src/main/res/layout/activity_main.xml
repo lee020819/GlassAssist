@@ -166,18 +166,6 @@
                         android:paddingBottom="6dp"
                         android:layout_marginEnd="6dp"/>
 
-                    <TextView
-                        android:id="@+id/btn_stop"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="중지"
-                        android:textSize="13sp"
-                        android:textColor="#FFFFFF"
-                        android:background="#F44336"
-                        android:paddingStart="12dp"
-                        android:paddingEnd="12dp"
-                        android:paddingTop="6dp"
-                        android:paddingBottom="6dp"/>
                 </LinearLayout>
 
                 <TextView

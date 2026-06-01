@@ -27,7 +27,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="접객보호 이력 통계"
+            android:text="보호 통계"
             android:textSize="18sp"
             android:textStyle="bold"
             android:textColor="#FFFFFF"/>

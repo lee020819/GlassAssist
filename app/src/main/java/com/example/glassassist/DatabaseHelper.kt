@@ -52,14 +52,6 @@ class DatabaseHelper(context: Context) : SQLiteOpenHelper(context, "glassassist.
                 time TEXT NOT NULL,
                 content TEXT NOT NULL
             )""")
-        db.execSQL("""
-            CREATE TABLE IF NOT EXISTS inspection_schedule (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                facility TEXT NOT NULL,
-                interval_days INTEGER NOT NULL,
-                last_checked TEXT,
-                note TEXT
-            )""")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -216,31 +208,6 @@ class DatabaseHelper(context: Context) : SQLiteOpenHelper(context, "glassassist.
         return list
     }
 
-    // 점검 스케줄
-    data class ScheduleData(val id: Int, val facility: String, val intervalDays: Int, val lastChecked: String?, val note: String?)
-
-    fun insertSchedule(facility: String, intervalDays: Int, lastChecked: String? = null, note: String? = null): Long {
-        return writableDatabase.insert("inspection_schedule", null, ContentValues().apply {
-            put("facility", facility); put("interval_days", intervalDays)
-            lastChecked?.let { put("last_checked", it) }
-            note?.let { put("note", it) }
-        })
-    }
-
-    fun updateScheduleChecked(id: Int, lastChecked: String) {
-        writableDatabase.execSQL(
-            "UPDATE inspection_schedule SET last_checked = ? WHERE id = ?",
-            arrayOf(lastChecked, id.toString())
-        )
-    }
-
-    fun updateScheduleCheckedWithNote(id: Int, lastChecked: String, note: String?) {
-        writableDatabase.execSQL(
-            "UPDATE inspection_schedule SET last_checked = ?, note = ? WHERE id = ?",
-            arrayOf(lastChecked, note, id.toString())
-        )
-    }
-
     fun getMeterRecordsByFacility(userId: String, facilityKeyword: String): List<MeterData> {
         val list = mutableListOf<MeterData>()
         readableDatabase.rawQuery(
@@ -251,25 +218,6 @@ class DatabaseHelper(context: Context) : SQLiteOpenHelper(context, "glassassist.
                 list.add(MeterData(c.getString(0), c.getString(1), c.getString(2), c.getString(3)))
         }
         return list
-    }
-
-    fun deleteSchedule(id: Int) {
-        writableDatabase.delete("inspection_schedule", "id = ?", arrayOf(id.toString()))
-    }
-
-    fun getSchedules(): List<ScheduleData> {
-        val list = mutableListOf<ScheduleData>()
-        readableDatabase.rawQuery("SELECT id, facility, interval_days, last_checked, note FROM inspection_schedule ORDER BY id ASC", null).use { c ->
-            while (c.moveToNext())
-                list.add(ScheduleData(c.getInt(0), c.getString(1), c.getInt(2), c.getString(3), c.getString(4)))
-        }
-        return list
-    }
-
-    fun isScheduleEmpty(): Boolean {
-        return readableDatabase.rawQuery("SELECT COUNT(*) FROM inspection_schedule", null).use { c ->
-            c.moveToFirst(); c.getInt(0) == 0
-        }
     }
 
     fun deleteAllRecords(userId: String) {
