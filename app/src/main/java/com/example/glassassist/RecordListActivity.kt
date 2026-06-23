@@ -233,11 +233,6 @@ class RecordListActivity : AppCompatActivity() {
                 putExtra("question", row.extra1 ?: "")
                 putExtra("answer", row.extra2 ?: "")
             }
-            "video" -> Intent(this, VideoDetailActivity::class.java).apply {
-                putExtra("date", row.date)
-                putExtra("time", row.time)
-                putExtra("videoUri", row.extra1)
-            }
             "meter" -> {
                 val loc = row.extra1 ?: ""
                 Intent(this, MeterDetailActivity::class.java).apply {
@@ -269,9 +264,6 @@ class RecordListActivity : AppCompatActivity() {
             }
             "protection" -> db.getProtectionRecords(userId).map {
                 RecordRow(it.date, it.time, it.keyword, "", extra1 = it.videoUri)
-            }
-            "video" -> db.getVideoRecords(userId).map {
-                RecordRow(it.date, it.time, "영상 기록", it.videoUri ?: "-", extra1 = it.videoUri)
             }
             "meter" -> db.getMeterRecords(userId).map {
                 RecordRow(it.date, it.time, it.location, "", extra1 = it.location, extra2 = it.videoUri)

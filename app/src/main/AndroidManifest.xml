@@ -54,7 +54,6 @@
 
         <activity android:name=".QaDetailActivity" android:exported="false"/>
         <activity android:name=".ProtectionDetailActivity" android:exported="false"/>
-        <activity android:name=".VideoDetailActivity" android:exported="false"/>
         <activity android:name=".MeterDetailActivity" android:exported="false"/>
         <activity android:name=".HandoverDetailActivity" android:exported="false"/>
         <activity android:name=".DispatchActivity" android:exported="false"/>

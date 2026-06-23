@@ -76,12 +76,10 @@ class MainActivity : AppCompatActivity() {
 
     private val qaList = mutableListOf<RecordItem>()
     private val protectionList = mutableListOf<RecordItem>()
-    private val videoList = mutableListOf<RecordItem>()
     private val meterList = mutableListOf<RecordItem>()
 
     private lateinit var qaAdapter: ArrayAdapter<String>
     private lateinit var protectionAdapter: ArrayAdapter<String>
-    private lateinit var videoAdapter: ArrayAdapter<String>
     private lateinit var meterAdapter: ArrayAdapter<String>
 
     private val dateFormat = SimpleDateFormat("yyyy.M.d", Locale.KOREAN)
@@ -419,7 +417,6 @@ class MainActivity : AppCompatActivity() {
         dbExecutor.execute {
             val protections = db.getProtectionRecords(userId)
             val qas = db.getQaRecords(userId)
-            val videos = db.getVideoRecords(userId)
             val meters = db.getMeterRecords(userId)
 
             runOnUiThread {
@@ -431,10 +428,6 @@ class MainActivity : AppCompatActivity() {
                     qaList.add(RecordItem(r.date, r.time, question = r.question, answer = r.answer))
                     qaAdapter.add("${r.time} Q: ${r.question.take(10)}...")
                 }
-                videos.forEach { r ->
-                    videoList.add(RecordItem(r.date, r.time, videoUri = r.videoUri))
-                    videoAdapter.add("${r.date} ${r.time} 촬영")
-                }
                 meters.forEach { r ->
                     meterList.add(RecordItem(r.date, r.time, location = r.location, videoUri = r.videoUri))
                     meterAdapter.add("${r.date} ${r.time} - ${r.location}")
@@ -445,9 +438,8 @@ class MainActivity : AppCompatActivity() {
                 }
                 protectionAdapter.notifyDataSetChanged()
                 qaAdapter.notifyDataSetChanged()
-                videoAdapter.notifyDataSetChanged()
                 meterAdapter.notifyDataSetChanged()
-                Log.d("GlassAssist", "DB 로드: 보호${protections.size} QA${qas.size} 영상${videos.size} 계량기${meters.size}")
+                Log.d("GlassAssist", "DB 로드: 보호${protections.size} QA${qas.size} 계량기${meters.size}")
             }
         }
     }
@@ -647,11 +639,9 @@ class MainActivity : AppCompatActivity() {
                         tts.speak("사진이 저장되었습니다", TextToSpeech.QUEUE_FLUSH, null, "insp_saved")
                     }
                 } else {
-                    // 대기 중인 점검 기록 없음 → 실시간 영상전송 탭에 저장
+                    // 점검/보호와 무관한 사진 → 저장하지 않음(대기)
                     runOnUiThread {
-                        sttText.text = "안경 사진이 저장되었습니다.\n[화면 탭: 대기]"
-                        tts.speak("안경 사진이 저장되었습니다", TextToSpeech.QUEUE_FLUSH, null, "photo_${System.currentTimeMillis()}")
-                        addVideoRecord(imageUri, file.absolutePath)
+                        sttText.text = "[화면 탭: 대기]"
                         standbyHandler.removeCallbacks(standbyRunnable)
                         standbyHandler.postDelayed(standbyRunnable, 3000)
                     }
@@ -718,28 +708,16 @@ class MainActivity : AppCompatActivity() {
         if (bestMatch != null && bestMatch.videoUri != null) {
             val existingDiff = glassFileRecordingDiff(bestMatch.videoUri!!, bestMatch.timestampMs)
             if (newDiff >= existingDiff) {
-                // 기존 영상이 더 가깝거나 같음 → 새 영상은 실시간 영상전송으로
-                Log.d("GlassAssist", "기존 영상이 더 가까움 → 실시간 영상전송으로 저장")
-                android.media.MediaScannerConnection.scanFile(
-                    this, arrayOf(file.absolutePath), arrayOf("video/mp4")
-                ) { _, uri ->
-                    val videoUri = uri?.toString() ?: return@scanFile
-                    runOnUiThread { addVideoRecord(videoUri, file.absolutePath) }
-                }
+                // 기존 보호 영상이 더 가까움 → 새 영상 무시
+                Log.d("GlassAssist", "기존 보호 영상이 더 가까움 → 새 영상 무시")
                 return
             }
-            // 새 영상이 더 가까움 → 기존 영상을 실시간 영상전송으로 내리고 교체
-            Log.d("GlassAssist", "새 영상이 더 가까움 → 기존 영상 실시간 탭으로 이동 후 교체")
+            // 새 영상이 더 가까움 → 보호 영상 교체
+            Log.d("GlassAssist", "새 영상이 더 가까움 → 보호 영상 교체")
         }
 
         if (bestMatch == null) {
-            Log.d("GlassAssist", "매칭 보호기록 없음 → 실시간 영상전송으로 저장")
-            android.media.MediaScannerConnection.scanFile(
-                this, arrayOf(file.absolutePath), arrayOf("video/mp4")
-            ) { _, uri ->
-                val videoUri = uri?.toString() ?: return@scanFile
-                runOnUiThread { addVideoRecord(videoUri) }
-            }
+            Log.d("GlassAssist", "매칭 보호기록 없음 → 영상 무시")
             return
         }
 
@@ -768,8 +746,6 @@ class MainActivity : AppCompatActivity() {
             dbExecutor.execute { db.linkProtectionVideo(userId, bestMatch.timestampMs, storedUri) }
             uploadProtectionVideo(bestMatch.timestampMs, storedUri)
             runOnUiThread {
-                val oldUri = bestMatch.videoUri  // 교체되는 기존 영상
-                if (oldUri != null) addVideoRecord(oldUri, oldUri)  // 기존 영상 → 실시간 영상전송
                 bestMatch.videoUri = storedUri
                 isHandlingDanger = false
                 stopProtectionStream()
@@ -822,18 +798,6 @@ class MainActivity : AppCompatActivity() {
             })
         }
 
-        videoAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, mutableListOf<String>())
-        val videoListView = findViewById<ListView>(R.id.list_video)
-        videoListView.adapter = videoAdapter
-        videoListView.setOnItemClickListener { _, _, position, _ ->
-            val item = videoList[position]
-            startActivity(Intent(this, VideoDetailActivity::class.java).apply {
-                putExtra("date", item.date)
-                putExtra("time", item.time)
-                putExtra("videoUri", item.videoUri)
-            })
-        }
-
         meterAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, mutableListOf<String>())
         val meterListView = findViewById<ListView>(R.id.list_meter)
         meterListView.adapter = meterAdapter
@@ -875,7 +839,6 @@ class MainActivity : AppCompatActivity() {
                     dbExecutor.execute { db.deleteAllRecords(userId) }
                     protectionList.clear(); protectionAdapter.clear()
                     qaList.clear(); qaAdapter.clear()
-                    videoList.clear(); videoAdapter.clear()
                     meterList.clear(); meterAdapter.clear()
                     handoverList.clear(); handoverAdapter.clear()
                     sttText.text = "기록이 삭제되었습니다.\n[화면 탭: 대기]"
@@ -1009,27 +972,6 @@ class MainActivity : AppCompatActivity() {
             protectionAdapter.clear()
             protectionList.forEach { protectionAdapter.add("${it.date} ${it.time} ${it.keyword}") }
             protectionAdapter.notifyDataSetChanged()
-        }
-    }
-
-    private fun addVideoRecord(uri: String? = null, localFilePath: String? = null) {
-        val now = Date()
-        val item = RecordItem(date = dateFormat.format(now), time = timeFormat.format(now), videoUri = uri)
-        videoList.add(0, item)
-        dbExecutor.execute {
-            db.insertVideo(userId, item.date, item.time, uri)
-        }
-        if (localFilePath != null) {
-            uploadMediaFile("db/video-file", mapOf("date" to item.date, "time" to item.time), localFilePath)
-        } else {
-            syncToServer("video", JSONObject()
-                .put("userId", userId).put("date", item.date).put("time", item.time)
-                .put("videoUri", uri ?: ""))
-        }
-        runOnUiThread {
-            videoAdapter.clear()
-            videoList.forEach { videoAdapter.add("${it.date} ${it.time} 촬영") }
-            videoAdapter.notifyDataSetChanged()
         }
     }
 
@@ -1871,7 +1813,6 @@ class MainActivity : AppCompatActivity() {
 📊 업무 통계
 - 질의응답: ${qaList.size}건
 - 접객보호 감지: ${protectionList.size}건
-- 영상 전송: ${videoList.size}건
 - 계량기 점검: ${meterList.size}건
 
 ⚠️ 접객보호 상세
@@ -1882,9 +1823,6 @@ ${if (qaList.isEmpty()) "없음" else qaList.joinToString("\n") { "  [${it.time}
 
 📊 계량기 점검 상세
 ${if (meterList.isEmpty()) "없음" else meterList.joinToString("\n") { "  [${it.time}] 위치: ${it.location}" }}
-
-📹 영상 전송
-${if (videoList.isEmpty()) "없음" else videoList.joinToString("\n") { "  [${it.time}] 촬영 기록" }}
 
 📝 인수인계 사항
 $handoverText
@@ -2004,7 +1942,6 @@ $handoverText
         val features = listOf(
             FeatureItem(R.drawable.ic_qa, "질의응답", "qa"),
             FeatureItem(R.drawable.ic_protection, "접객보호", "protection"),
-            // FeatureItem(R.drawable.ic_video, "영상전송", "video"),   // 데모 임시 숨김 (나중에 복구)
             // FeatureItem(R.drawable.ic_meter, "계량기", "meter"),   // 계량기는 코레일 외주 담당이라 기능 제외
             // FeatureItem(R.drawable.ic_handover, "인수인계", "handover"),   // 임시 숨김
             FeatureItem(R.drawable.ic_dispatch, "관제실", "dispatch"),

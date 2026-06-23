@@ -68,60 +68,6 @@ class ProtectionDetailActivity : AppCompatActivity() {
     }
 }
 
-class VideoDetailActivity : AppCompatActivity() {
-    private var player: ExoPlayer? = null
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_video_detail)
-
-        findViewById<ImageButton>(R.id.btn_back).setOnClickListener { finish() }
-
-        findViewById<TextView>(R.id.tv_date).text = intent.getStringExtra("date") ?: "-"
-        findViewById<TextView>(R.id.tv_time).text = intent.getStringExtra("time") ?: "-"
-
-        val mediaUri = intent.getStringExtra("videoUri")
-        val playerView = findViewById<PlayerView>(R.id.video_view)
-        val imageView = findViewById<ImageView>(R.id.image_view)
-        val noVideoText = findViewById<TextView>(R.id.tv_no_video)
-
-        if (mediaUri != null) {
-            noVideoText.visibility = View.GONE
-            val isImage = try {
-                val mime = contentResolver.getType(Uri.parse(mediaUri)) ?: ""
-                mime.startsWith("image/")
-            } catch (e: Exception) {
-                mediaUri.substringAfterLast('.').lowercase() in listOf("jpg", "jpeg", "png")
-            }
-            if (isImage) {
-                playerView.visibility = View.GONE
-                imageView.visibility = View.VISIBLE
-                val uri = if (mediaUri.startsWith("/")) Uri.fromFile(File(mediaUri)) else Uri.parse(mediaUri)
-                imageView.setImageURI(uri)
-            } else {
-                imageView.visibility = View.GONE
-                playerView.visibility = View.VISIBLE
-                val uri = if (mediaUri.startsWith("/")) Uri.fromFile(File(mediaUri)) else Uri.parse(mediaUri)
-                player = ExoPlayer.Builder(this).build().also { exo ->
-                    playerView.player = exo
-                    exo.setMediaItem(MediaItem.fromUri(uri))
-                    exo.prepare()
-                    exo.play()
-                }
-            }
-        } else {
-            noVideoText.visibility = View.VISIBLE
-            playerView.visibility = View.GONE
-            imageView.visibility = View.GONE
-        }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        player?.release()
-    }
-}
-
 class MeterDetailActivity : AppCompatActivity() {
     private val CAMERA_REQUEST_CODE = 200
     private var photoUri: Uri? = null

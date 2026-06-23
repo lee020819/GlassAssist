@@ -28,14 +28,6 @@ class DatabaseHelper(context: Context) : SQLiteOpenHelper(context, "glassassist.
                 answer TEXT NOT NULL
             )""")
         db.execSQL("""
-            CREATE TABLE IF NOT EXISTS video_records (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                userId TEXT NOT NULL,
-                date TEXT NOT NULL,
-                time TEXT NOT NULL,
-                videoUri TEXT
-            )""")
-        db.execSQL("""
             CREATE TABLE IF NOT EXISTS meter_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 userId TEXT NOT NULL,
@@ -124,26 +116,6 @@ class DatabaseHelper(context: Context) : SQLiteOpenHelper(context, "glassassist.
         return list
     }
 
-    // 영상
-    fun insertVideo(userId: String, date: String, time: String, videoUri: String?) {
-        writableDatabase.insert("video_records", null, ContentValues().apply {
-            put("userId", userId); put("date", date); put("time", time)
-            videoUri?.let { put("videoUri", it) }
-        })
-    }
-
-    fun getVideoRecords(userId: String): List<VideoData> {
-        val list = mutableListOf<VideoData>()
-        readableDatabase.rawQuery(
-            "SELECT date, time, videoUri FROM video_records WHERE userId = ? ORDER BY id DESC",
-            arrayOf(userId)
-        ).use { c ->
-            while (c.moveToNext())
-                list.add(VideoData(c.getString(0), c.getString(1), c.getString(2)))
-        }
-        return list
-    }
-
     // 계량기
     fun insertMeter(userId: String, date: String, time: String, location: String, videoUri: String? = null) {
         writableDatabase.insert("meter_records", null, ContentValues().apply {
@@ -224,7 +196,6 @@ class DatabaseHelper(context: Context) : SQLiteOpenHelper(context, "glassassist.
         writableDatabase.let { db ->
             db.delete("protection_records", "userId = ?", arrayOf(userId))
             db.delete("qa_records", "userId = ?", arrayOf(userId))
-            db.delete("video_records", "userId = ?", arrayOf(userId))
             db.delete("meter_records", "userId = ?", arrayOf(userId))
             db.delete("handover_records", "userId = ?", arrayOf(userId))
         }
@@ -232,7 +203,6 @@ class DatabaseHelper(context: Context) : SQLiteOpenHelper(context, "glassassist.
 
     data class ProtectionData(val date: String, val time: String, val timestampMs: Long, val keyword: String, val videoUri: String?)
     data class QaData(val date: String, val time: String, val question: String, val answer: String)
-    data class VideoData(val date: String, val time: String, val videoUri: String?)
     data class MeterData(val date: String, val time: String, val location: String, val videoUri: String?)
     data class HandoverData(val date: String, val time: String, val content: String)
 }
