@@ -162,7 +162,6 @@ class MainActivity : AppCompatActivity() {
         "일상" to "일상점검", "정기" to "정기점검", "전기" to "정기점검",
         "수시" to "수시점검", "특별" to "특별점검", "긴급" to "긴급점검"
     )
-    private var inspectionTriggerKeywords: List<String> = emptyList()
     @Volatile private var activeCall: okhttp3.Call? = null
 
     private lateinit var phoneCameraLauncher: ActivityResultLauncher<Uri>
@@ -197,7 +196,7 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             tts.speak("음성인식 대기 중입니다", TextToSpeech.QUEUE_FLUSH, null, "standby")
-            runOnUiThread { sttText.text = "음성인식 대기 중...\n[화면 탭: 대기]" }
+            runOnUiThread { sttText.text = "음성인식 대기 중... ('코비'라고 부르세요)\n[화면 탭: 대기]" }
             monitorRestartHandler.postDelayed({ resumeContinuousMonitoring() }, 3500)
         }
     }
@@ -333,7 +332,6 @@ class MainActivity : AppCompatActivity() {
 
         userPrefs = UserPreferences(this)
         db = DatabaseHelper(this)
-        loadInspectionKeywords()
 
         statusText = findViewById(R.id.status_text)
         glassStatusText = findViewById(R.id.glass_status_text)
@@ -381,7 +379,7 @@ class MainActivity : AppCompatActivity() {
             tts.stop()
             pauseContinuousMonitoring()
             tts.speak("음성인식 대기 중입니다", TextToSpeech.QUEUE_FLUSH, null, "standby")
-            sttText.text = "음성인식 대기 중...\n[화면 탭: 대기]"
+            sttText.text = "음성인식 대기 중... ('코비'라고 부르세요)\n[화면 탭: 대기]"
             monitorRestartHandler.postDelayed({ resumeContinuousMonitoring() }, 3500)
         }
 
@@ -1289,21 +1287,60 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleWhisperText(text: String) {
         if (text.isBlank()) { whisperPaused = false; return }
+        Log.d("GlassAssist", "STT인식: '$text'")
         val compact = text.replace(" ", "")
         // 정지 명령은 TTS 재생 중에도 항상 우선 처리 (resetToStandby가 TTS도 중지)
-        if (compact.contains("대기") || compact.contains("중지") || compact.contains("그만") ||
-            compact.contains("취소") || compact.contains("멈춰")) {
+        // 발화가 정지어 자체일 때만 처리 ('운행중지' 같은 내용어 부분일치로 끊기는 것 방지)
+        val stopCmds = setOf("대기", "태기", "중지", "그만", "취소", "멈춰", "정지", "중단",
+                             "그만해", "중지해", "멈춰줘", "정지해", "대기해", "스톱", "스탑")
+        val stopQuery = compact.removePrefix("코비야").removePrefix("코비아").removePrefix("코비")
+        if (compact in stopCmds || stopQuery in stopCmds) {
             resetToStandby()
             return
         }
         // 답변 처리 중 정지 외 발화는 무시 (에코·중복 방지)
         if (llmBusy) { whisperPaused = false; return }
         runOnUiThread { sttText.text = "[STT] $text" }
-        if (text.length >= 2) {
-            sendToLLM(text)
+        if (text.length < 2) { whisperPaused = false; return }
+
+        // 통역 모드 중: 모든 발화를 번역 경로로 (외국인 승객 발화 -> 한국어 안내). 종료는 화면 탭 또는 "stop translation".
+        if (translationModeActive) {
+            // 음성 종료: 영어 STT라, "stop"과 "translation"이 한 발화에 둘 다 있으면 종료 (부분 단어로는 종료 안 됨)
+            val low = text.lowercase()
+            if (low.contains("stop") && low.contains("translation")) {
+                resetToStandby()
+                return
+            }
+            sendToLLM(text, isCall = true)
             return
         }
-        whisperPaused = false
+
+        // 웨이크워드 게이팅: "코비" 호출 시에만 질의 응답, 호출어 없는 발화는 접객보호(danger)만 검사
+        val wakeQuery = extractWakeQuery(text)
+        if (wakeQuery != null) {
+            // "코비야, 통역" / "코비야, 번역" -> 통역 모드 시작 (시리/빅스비식: 켜는 모드, 종료는 화면 탭)
+            if (wakeQuery.replace(" ", "").let { it.contains("통역") || it.contains("번역") }) {
+                translationModeActive = true
+                isTranslationMode = true
+                runOnUiThread {
+                    sttText.text = "🌐 통역 모드 시작\n외국어로 말씀하시면 한국어로 안내합니다.\n[화면 탭 또는 'stop translation' 으로 종료]"
+                    tts.speak("통역 모드를 시작합니다. 외국어로 말씀해 주세요.", TextToSpeech.QUEUE_FLUSH, null, "trans_on")
+                }
+                whisperPaused = false
+                return
+            }
+            if (wakeQuery.isBlank()) { whisperPaused = false; return }  // 호출만 하고 질의 없음
+            sendToLLM(wakeQuery, isCall = true)
+        } else {
+            sendToLLM(text, isCall = false)
+        }
+    }
+
+    // "코비" 호출어 추출: 있으면 호출어 뒤 질의 반환(빈 문자열 가능), 없으면 null
+    private val wakeRegex = Regex("코\\s*비(야|아)?")
+    private fun extractWakeQuery(text: String): String? {
+        val m = wakeRegex.find(text) ?: return null
+        return text.substring(m.range.last + 1).trimStart(' ', ',', '.', '!', '?', '~', '·')
     }
 
     private fun initGlassStream() {
@@ -1450,19 +1487,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun loadInspectionKeywords() {
-        try {
-            val json = assets.open("inspection_keywords.json").bufferedReader().use { it.readText() }
-            val root = org.json.JSONObject(json)
-            val arr = root.getJSONArray("trigger_keywords")
-            val list = mutableListOf<String>()
-            for (i in 0 until arr.length()) list.add(arr.getString(i))
-            inspectionTriggerKeywords = list
-        } catch (e: Exception) {
-            android.util.Log.e("GlassAssist", "inspection_keywords.json 로드 실패: ${e.message}")
-        }
-    }
-
     // 위험 감지 시 TTS 알림만 (영상은 안경 버튼으로 직접 촬영)
     private fun startDangerAlert() {
         startProtectionStream()
@@ -1496,12 +1520,13 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun sendToLLM(text: String) {
+    private fun sendToLLM(text: String, isCall: Boolean = true) {
         pauseContinuousMonitoring()
         llmBusy = true
         sttInterrupt = false
         Thread {
             try {
+                Log.d("GlassAssist", "→서버요청: '$text' (isCall=$isCall)")
                 val jsonBody = JSONObject().put("text", text).toString()
                     .toRequestBody("application/json".toMediaType())
                 val request = Request.Builder().url("$apiUrl/chat").post(jsonBody).build()
@@ -1531,6 +1556,13 @@ class MainActivity : AppCompatActivity() {
 
                 val type = json.optString("type", "qa")
                 val ttsMsg = json.optString("tts", "")
+
+                // 웨이크워드 게이팅(B): 호출어 없는 발화는 접객보호(danger)만 처리, 나머지는 무시
+                if (!isCall && type != "danger") {
+                    response.close()
+                    runOnUiThread { resumeContinuousMonitoring() }
+                    return@Thread
+                }
                 if (type != "qa") response.close()
 
                 when (type) {
@@ -1612,6 +1644,7 @@ class MainActivity : AppCompatActivity() {
                             val obj = try { JSONObject(line) } catch (e: Exception) { continue }
                             if (obj.optBoolean("done", false)) {
                                 val ans = obj.optString("answer", fullAnswer.toString().trim())
+                                Log.d("GlassAssist", "←qa답변: $ans")
                                 addQaRecord(text, ans)
                                 runOnUiThread { sttText.text = "Q: $text\n\nA: $ans" }
                                 break
@@ -1751,7 +1784,7 @@ class MainActivity : AppCompatActivity() {
         stopProtectionStream()
         pauseContinuousMonitoring()
         runOnUiThread {
-            sttText.text = "음성인식 대기 중...\n[화면 탭: 대기]"
+            sttText.text = "음성인식 대기 중... ('코비'라고 부르세요)\n[화면 탭: 대기]"
             tts.speak("대기중입니다", TextToSpeech.QUEUE_FLUSH, null, "reset_standby")
         }
         val waitForTts = object : Runnable {
@@ -1971,12 +2004,12 @@ $handoverText
         val features = listOf(
             FeatureItem(R.drawable.ic_qa, "질의응답", "qa"),
             FeatureItem(R.drawable.ic_protection, "접객보호", "protection"),
-            FeatureItem(R.drawable.ic_video, "영상전송", "video"),
-            FeatureItem(R.drawable.ic_meter, "계량기", "meter"),
-            FeatureItem(R.drawable.ic_handover, "인수인계", "handover"),
+            // FeatureItem(R.drawable.ic_video, "영상전송", "video"),   // 데모 임시 숨김 (나중에 복구)
+            // FeatureItem(R.drawable.ic_meter, "계량기", "meter"),   // 계량기는 코레일 외주 담당이라 기능 제외
+            // FeatureItem(R.drawable.ic_handover, "인수인계", "handover"),   // 임시 숨김
             FeatureItem(R.drawable.ic_dispatch, "관제실", "dispatch"),
             FeatureItem(R.drawable.ic_translate, "번역", "translate"),
-            FeatureItem(R.drawable.ic_stats, "보호 통계", "stats"),
+            // FeatureItem(R.drawable.ic_stats, "보호 통계", "stats"),   // 데모 임시 숨김 (나중에 복구)
         )
         val rvFeatures = findViewById<RecyclerView>(R.id.rv_features)
         rvFeatures.layoutManager = GridLayoutManager(this, 3)
